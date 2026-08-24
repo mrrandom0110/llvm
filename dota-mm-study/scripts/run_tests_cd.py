@@ -175,6 +175,7 @@ def main() -> None:
         "ally_skill": "сила союзников",
         "enemy_skill": "сила соперников",
         "delta": "перекос состава",
+        "skill_spread": "разброс силы в матче",
     }
     results["test_d"] = {}
     for key, title in channel_names.items():

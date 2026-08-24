@@ -80,6 +80,7 @@ def build_roster_observations(
         if len(ally) < min_known_per_side or len(enemy) < min_known_per_side:
             continue
 
+        all_skill = group["skill"].dropna()
         records.append(
             {
                 "match_id": row.match_id,
@@ -89,6 +90,10 @@ def build_roster_observations(
                 "ally_skill": float(ally.mean()),
                 "enemy_skill": float(enemy.mean()),
                 "delta": float(ally.mean() - enemy.mean()),
+                # Разброс силы внутри матча: второй рычаг, которым матчмейкер
+                # мог бы вмешиваться, — не перекос между командами, а само
+                # расширение окна подбора для игрока на серии.
+                "skill_spread": float(all_skill.std(ddof=0)) if len(all_skill) > 2 else float("nan"),
                 "n_ally_known": int(len(ally)),
                 "n_enemy_known": int(len(enemy)),
                 "anon_share": float(group["account_id"].isna().mean()),
@@ -212,11 +217,17 @@ def decompose_streak(
         counts = obs["account_id"].map(obs["account_id"].value_counts())
         usable = counts >= 2
         if usable.sum() > 50:
-            for channel in ("ally_skill", "enemy_skill", "delta"):
+            for channel in ("ally_skill", "enemy_skill", "delta", "skill_spread"):
+                if channel not in obs:
+                    continue
+                values = obs.loc[usable, channel]
+                keep = values.notna().to_numpy()
+                if keep.sum() < 50:
+                    continue
                 result[channel] = fixed_effects_lpm(
-                    obs.loc[usable, channel].to_numpy(dtype=float),
-                    np.column_stack([streak[usable.to_numpy()]]),
-                    obs.loc[usable, "account_id"].to_numpy(),
+                    values.to_numpy(dtype=float)[keep],
+                    np.column_stack([streak[usable.to_numpy()][keep]]),
+                    obs.loc[usable, "account_id"].to_numpy()[keep],
                     ["streak"],
                 )
     return result
