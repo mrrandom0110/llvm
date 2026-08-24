@@ -24,18 +24,39 @@ MONTH = 30 * 86400
 DIVINE_TIER = 70
 
 
-def estimate_registration_time(df: pd.DataFrame) -> pd.Series:
-    """Оценка даты регистрации аккаунта по его номеру.
+def calibrate_account_age(account_ids: pd.Series, first_match: pd.Series) -> pd.Series:
+    """Датировка регистрации аккаунта по его номеру.
 
-    Steam выдаёт account_id почти монотонно по времени, поэтому номер аккаунта
-    сам по себе датирует регистрацию. Калибровка строится по нашим же данным:
-    для каждого аккаунта известен его первый матч, и минимальное время первого
-    матча среди всех аккаунтов с номером не больше данного даёт нижнюю границу
-    даты регистрации. Кумулятивный минимум делает оценку монотонной по номеру.
+    Steam выдаёт account_id почти монотонно по времени регистрации, поэтому сам
+    номер датирует аккаунт. Калибровочная кривая строится по нашим же данным:
+    внутри окон по номеру берётся медиана даты первого матча, после чего кривая
+    делается монотонной кумулятивным максимумом.
+
+    Оценка нужна там, где наблюдаемый первый матч вводит в заблуждение: у
+    вернувшегося после долгого перерыва игрока история может начинаться недавно
+    при старом аккаунте, и без поправки он выглядел бы смурфом.
     """
-    ordered = df.sort_values("account_id")
-    running_min = ordered["first_match"].cummin()
-    return running_min.reindex(df.index)
+    frame = pd.DataFrame({"account_id": account_ids, "first_match": first_match}).dropna()
+    if len(frame) < 20:
+        return pd.Series(np.nan, index=account_ids.index)
+
+    frame = frame.sort_values("account_id")
+    n_bins = max(min(len(frame) // 25, 60), 4)
+    frame["bin"] = pd.qcut(frame["account_id"], n_bins, duplicates="drop")
+    curve = frame.groupby("bin", observed=True).agg(
+        account_id=("account_id", "median"), first_match=("first_match", "median")
+    )
+    curve["first_match"] = curve["first_match"].cummax()
+    curve = curve.dropna().sort_values("account_id")
+    if len(curve) < 2:
+        return pd.Series(np.nan, index=account_ids.index)
+
+    estimated = np.interp(
+        account_ids.to_numpy(dtype=float),
+        curve["account_id"].to_numpy(dtype=float),
+        curve["first_match"].to_numpy(dtype=float),
+    )
+    return pd.Series(estimated, index=account_ids.index)
 
 
 def _safe_z(series: pd.Series) -> pd.Series:
@@ -58,8 +79,17 @@ def _rank_slope(group: pd.DataFrame) -> float:
     return float(slope)
 
 
-def build_profiles(matches: pd.DataFrame, first_n: int = 50) -> pd.DataFrame:
-    """Сводка по каждому игроку: динамика ранга, перформанс, ранняя доминантность."""
+def build_profiles(
+    matches: pd.DataFrame,
+    history_meta: pd.DataFrame | None = None,
+    first_n: int = 50,
+) -> pd.DataFrame:
+    """Сводка по каждому игроку: динамика ранга, перформанс, ранняя доминантность.
+
+    `history_meta` содержит границы полной истории аккаунта, включая матчи до
+    окна исследования. Без неё возраст аккаунта систематически занижался бы:
+    первый матч в окне — это не первый матч в жизни аккаунта.
+    """
     df = matches.sort_values(["account_id", "start_time"], kind="stable")
 
     agg = df.groupby("account_id").agg(
@@ -88,8 +118,22 @@ def build_profiles(matches: pd.DataFrame, first_n: int = 50) -> pd.DataFrame:
     agg["winrate_early"] = early.groupby("account_id")["win"].mean()
 
     agg = agg.reset_index()
-    agg["registration_est"] = estimate_registration_time(agg).to_numpy()
-    agg["account_age_months"] = (agg["last_match"] - agg["registration_est"]) / MONTH
+
+    if history_meta is not None and not history_meta.empty:
+        agg = agg.merge(history_meta, on="account_id", how="left", suffixes=("", "_all"))
+    if "first_match_all" not in agg:
+        agg["first_match_all"] = agg["first_match"]
+    agg["first_match_all"] = agg["first_match_all"].fillna(agg["first_match"])
+
+    agg["registration_est"] = calibrate_account_age(
+        agg["account_id"], agg["first_match_all"]
+    )
+    # Возраст аккаунта: берём более раннюю из двух оценок, потому что обе дают
+    # верхнюю границу даты регистрации, а ошибиться в сторону «аккаунт старый»
+    # безопаснее, чем записать ветерана в смурфы.
+    origin = agg[["first_match_all", "registration_est"]].min(axis=1)
+    agg["registration_est"] = origin
+    agg["account_age_months"] = (agg["last_match"] - origin) / MONTH
     return agg
 
 
@@ -117,6 +161,9 @@ def score_cohorts(profiles: pd.DataFrame, thresholds: CohortThresholds | None = 
     out["smurf_score"] = (
         0.30 * climb + 0.30 * perf + 0.15 * youth + 0.15 * early_win + 0.10 * inexperience
     )
+    # Вариант без возрастной компоненты: нужен для честной валидации, поскольку
+    # проверочная метка сама опирается на возраст аккаунта.
+    out["smurf_score_no_age"] = 0.40 * climb + 0.40 * perf + 0.20 * early_win
 
     # Слабый игрок: устойчиво ниже уровня своего брекета, часто бросает матчи,
     # много умирает, рейтинг сползает вниз.
@@ -142,8 +189,11 @@ def semi_supervised_labels(profiles: pd.DataFrame) -> pd.DataFrame:
     Эти метки не участвуют в построении score, только в его валидации.
     """
     out = profiles.copy()
+    # Метка опирается на длину наблюдаемой карьеры и достигнутый брекет —
+    # величины, которые не входят в сам score. Аккаунт, за десять месяцев
+    # добравшийся до Divine, почти наверняка принадлежит опытному игроку.
     likely_smurf = (
-        (out["account_age_months"] < 12)
+        (out["span_months"] < 12)
         & (out["rank_max"] >= DIVINE_TIER)
         & (out["n_ranked"] >= 50)
     )
@@ -168,14 +218,24 @@ def auc(scores: np.ndarray, labels: np.ndarray) -> float:
 
 
 def validate(profiles: pd.DataFrame) -> dict[str, float]:
+    """Проверка разделяющей силы score на заведомых случаях.
+
+    Это проверка согласованности, а не независимая валидация: настоящей разметки
+    смурфов не существует, и проверочная метка частично опирается на те же
+    наблюдаемые величины. Поэтому отдельно приводится AUC варианта score без
+    возрастной компоненты — метка от него не зависит напрямую.
+    """
     labelled = semi_supervised_labels(profiles)
     subset = labelled[labelled["truth"] != ""]
     if subset.empty:
         return {"n": 0}
     y = (subset["truth"] == "smurf").astype(int).to_numpy()
-    return {
+    out = {
         "n": int(len(subset)),
         "n_smurf": int(y.sum()),
         "n_resident": int((1 - y).sum()),
         "auc": auc(subset["smurf_score"].to_numpy(), y),
     }
+    if "smurf_score_no_age" in subset:
+        out["auc_no_age"] = auc(subset["smurf_score_no_age"].to_numpy(), y)
+    return out
