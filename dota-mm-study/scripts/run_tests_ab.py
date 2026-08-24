@@ -293,10 +293,16 @@ def _plot(tallies, disp_real, null_model, curve, fe_ind, names) -> None:
     ax.legend(fontsize=7)
 
     ax = axes[1]
+    # Нулевая серия — это первый матч игрока, ячейка почти пустая, и её
+    # доверительный интервал сжимал бы весь остальной график.
+    keep = curve.streak != 0
     ax.errorbar(
-        curve.streak,
-        curve.winrate,
-        yerr=[curve.winrate - curve.lo, curve.hi - curve.winrate],
+        curve.streak[keep],
+        curve.winrate[keep],
+        yerr=[
+            (curve.winrate - curve.lo)[keep],
+            (curve.hi - curve.winrate)[keep],
+        ],
         fmt="o-",
         color=ACCENT,
         capsize=3,
