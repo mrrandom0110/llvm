@@ -185,11 +185,17 @@ class OpenDotaClient:
                 delay *= 2
                 continue
 
-            # 4xx кроме 429 повторять бессмысленно: чаще всего это приватный
-            # профиль или несуществующий матч. Запоминаем, чтобы не спрашивать
-            # снова, и возвращаем None.
-            self.cache.put(key, response.status_code, None)
-            return None
+            if response.status_code in (403, 404):
+                # Приватный профиль или несуществующий матч: состояние
+                # постоянное, запоминаем, чтобы не тратить на него квоту снова.
+                self.cache.put(key, response.status_code, None)
+                return None
+
+            # Прочие 4xx (в первую очередь 400 от эксплорера при таймауте SQL)
+            # могут быть временными, поэтому кэшировать их нельзя.
+            self.stats["errors"] += 1
+            detail = response.text[:200].replace("\n", " ")
+            raise OpenDotaError(f"{response.status_code} на {key}: {detail}")
 
         raise OpenDotaError(f"не удалось получить {key} за {retries + 1} попыток")
 
