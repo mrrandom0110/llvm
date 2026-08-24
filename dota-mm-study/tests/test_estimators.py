@@ -1,0 +1,215 @@
+"""Проверка оценщиков на данных с заранее известным ответом.
+
+Смысл этих тестов не в покрытии кода, а в доверии к числам: каждая статистика
+проверяется на синтетических данных, для которых правильный ответ выводится
+аналитически. Если оценщик смещён, весь вывод исследования обесценивается.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from dota_study import features
+from dota_study.stats import dispersion, roster, streaks
+
+
+def test_streaks_are_computed_before_the_match() -> None:
+    """Серия описывает прошлое, а не текущий матч."""
+    df = pd.DataFrame(
+        {
+            "account_id": [1, 1, 1, 1, 1, 2, 2],
+            "start_time": [1, 2, 3, 4, 5, 1, 2],
+            "win": [1, 1, 0, 0, 1, 0, 1],
+        }
+    )
+    out = features.add_streaks(df)
+    assert out["prev_streak"].tolist() == [0, 1, 2, -1, -2, 0, -1]
+
+
+def test_dispersion_detects_pure_binomial() -> None:
+    """У однородной популяции коэффициент дисперсии равен единице."""
+    rng = np.random.default_rng(1)
+    games = np.full(4000, 400)
+    wins = rng.binomial(games, 0.5)
+    result = dispersion.analyse(wins, games, n_boot=200)
+    assert result.phi == pytest.approx(1.0, abs=0.1)
+    assert result.phi_lo < 1.0 < result.phi_hi
+    assert result.true_sd < 0.005
+
+
+def test_dispersion_recovers_known_heterogeneity() -> None:
+    """При заданном разбросе истинных винрейтов оценщик его восстанавливает."""
+    rng = np.random.default_rng(2)
+    true_sd = 0.04
+    p = np.clip(rng.normal(0.5, true_sd, 4000), 0.05, 0.95)
+    games = np.full(4000, 500)
+    wins = rng.binomial(games, p)
+    result = dispersion.analyse(wins, games, n_boot=200)
+    assert result.true_sd == pytest.approx(true_sd, abs=0.006)
+    assert result.phi > 1.5
+    assert "жёсткая подкрутка отвергается" in result.verdict()
+
+
+def test_dispersion_detects_forced_fifty_percent() -> None:
+    """Принудительное сведение к 50% проявляется как недодисперсия."""
+    rng = np.random.default_rng(3)
+    n_players, n_games = 1500, 400
+    wins = np.empty(n_players, dtype=int)
+    for i in range(n_players):
+        # Каждое поражение повышает шанс победы и наоборот — ровно то, что
+        # приписывают «подкрутке».
+        balance, won = 0, 0
+        for _ in range(n_games):
+            p = 0.5 - 0.05 * np.clip(balance, -5, 5)
+            outcome = rng.random() < p
+            won += outcome
+            balance += 1 if outcome else -1
+        wins[i] = won
+    result = dispersion.analyse(wins, np.full(n_players, n_games), n_boot=200)
+    assert result.phi < 1.0
+    assert result.phi_hi < 1.0
+    assert result.verdict().startswith("недодисперсия")
+
+
+def test_fixed_effects_recovers_known_slope() -> None:
+    """Регрессия с поглощением эффектов групп восстанавливает заданный наклон."""
+    rng = np.random.default_rng(4)
+    n_players, per_player = 300, 200
+    account = np.repeat(np.arange(n_players), per_player)
+    # Большие индивидуальные различия, которые обязаны быть поглощены.
+    alpha = rng.normal(0.5, 0.15, n_players)[account]
+    x = rng.normal(0.0, 1.0, n_players * per_player)
+    true_slope = 0.02
+    p = np.clip(alpha + true_slope * x, 0.02, 0.98)
+    y = (rng.random(len(p)) < p).astype(float)
+
+    result = streaks.fixed_effects_lpm(y, np.column_stack([x]), account, ["x"])
+    assert result.coef[0] == pytest.approx(true_slope, abs=0.004)
+    lo, hi = result.ci("x")
+    assert lo < true_slope < hi
+
+
+def test_fixed_effects_absorbs_group_differences() -> None:
+    """Различия между игроками не должны просачиваться в оценку наклона.
+
+    Здесь объясняющая переменная скоррелирована с уровнем игрока, но истинного
+    эффекта нет. Без фиксированных эффектов оценка была бы сильно смещена.
+    """
+    rng = np.random.default_rng(5)
+    n_players, per_player = 400, 150
+    account = np.repeat(np.arange(n_players), per_player)
+    level = rng.normal(0.5, 0.1, n_players)
+    x = level[account] + rng.normal(0, 0.3, n_players * per_player)
+    y = (rng.random(len(x)) < np.clip(level[account], 0.02, 0.98)).astype(float)
+
+    naive = np.polyfit(x, y, 1)[0]
+    result = streaks.fixed_effects_lpm(y, np.column_stack([x]), account, ["x"])
+    assert abs(naive) > 0.05, "иначе тест не проверяет то, ради чего написан"
+    assert result.coef[0] == pytest.approx(0.0, abs=0.01)
+
+
+def test_clustered_errors_exceed_independent_ones() -> None:
+    """Кластеризация обязана расширять интервал при зависимости внутри игрока.
+
+    Зависимость создаётся на уровне сессий: она не поглощается фиксированным
+    эффектом игрока и одновременно присутствует в объясняющей переменной и в
+    ошибке. Именно в такой ситуации обычные стандартные ошибки занижены, и
+    любой шум выглядел бы значимым.
+    """
+    rng = np.random.default_rng(6)
+    n_players, n_sessions, per_session = 200, 20, 15
+    account = np.repeat(np.arange(n_players), n_sessions * per_session)
+    session_shock = np.repeat(
+        rng.normal(0, 1, n_players * n_sessions), per_session
+    )
+    x = session_shock + rng.normal(0, 0.5, len(account))
+    y = 0.3 * session_shock + rng.normal(0, 0.1, len(account))
+
+    clustered = streaks.fixed_effects_lpm(y, np.column_stack([x]), account, ["x"])
+
+    # Обычная гомоскедастичная ошибка той же регрессии для сравнения.
+    codes = pd.factorize(account)[0]
+    x_w = streaks._within_transform(x, codes, n_players)
+    y_w = streaks._within_transform(y, codes, n_players)
+    beta = (x_w @ y_w) / (x_w @ x_w)
+    resid = y_w - beta * x_w
+    sigma2 = resid @ resid / (len(y_w) - n_players - 1)
+    plain_se = np.sqrt(sigma2 / (x_w @ x_w))
+
+    assert clustered.se[0] > 1.5 * plain_se
+
+
+def test_runs_test_flags_alternating_sequences() -> None:
+    """Слишком частое чередование исходов даёт положительный z."""
+    alternating = pd.DataFrame(
+        {"account_id": np.repeat([1, 2], 400), "win": np.tile([0, 1], 400)}
+    )
+    result = streaks.runs_test(alternating, min_games=100)
+    assert result["mean_z"] > 5
+
+    rng = np.random.default_rng(7)
+    random_seq = pd.DataFrame(
+        {
+            "account_id": np.repeat(np.arange(200), 300),
+            "win": rng.integers(0, 2, 200 * 300),
+        }
+    )
+    result = streaks.runs_test(random_seq, min_games=100)
+    assert abs(result["mean_z"]) < 0.2
+
+
+def test_asymmetric_slopes_separate_directions() -> None:
+    """Разные наклоны для побед и поражений оцениваются раздельно."""
+    rng = np.random.default_rng(8)
+    rows = []
+    for player in range(150):
+        for streak in list(range(-4, 0)) + list(range(1, 5)):
+            for _ in range(60):
+                # Эффект есть только после побед.
+                p = 0.5 + (0.01 * streak if streak > 0 else 0.0)
+                rows.append(
+                    {
+                        "account_id": player,
+                        "prev_streak": streak,
+                        "win": int(rng.random() < p),
+                    }
+                )
+    df = pd.DataFrame(rows)
+    _, asym = streaks.asymmetric_slopes(df, controls=False)
+    assert asym["difference"] > 0.005
+    assert asym["p"] < 0.01
+
+
+def test_roster_observations_split_teams_correctly() -> None:
+    """Союзники и соперники определяются по стороне фокального игрока."""
+    roster_df = pd.DataFrame(
+        {
+            "match_id": [1] * 10,
+            "account_id": list(range(10)),
+            "player_slot": list(range(5)) + list(range(128, 133)),
+            "is_radiant": [1] * 5 + [0] * 5,
+            "rank_tier": [50, 52, 54, 56, 58, 60, 62, 64, 66, 68],
+        }
+    )
+    focal = pd.DataFrame(
+        {"match_id": [1], "account_id": [0], "prev_streak": [3], "win": [1]}
+    )
+    obs = roster.build_roster_observations(roster_df, focal)
+    assert len(obs) == 1
+    row = obs.iloc[0]
+    assert row["ally_skill"] == pytest.approx(55.0)   # 52,54,56,58
+    assert row["enemy_skill"] == pytest.approx(64.0)  # 60..68
+    assert row["delta"] == pytest.approx(-9.0)
+
+
+def test_wilson_interval_covers_true_rate() -> None:
+    from dota_study.controls import wilson_interval
+
+    lo, hi = wilson_interval(530, 1000, conf=0.99)
+    assert lo < 0.53 < hi
+    assert hi - lo < 0.09
+    # Крайний случай, на котором наивный нормальный интервал разваливается.
+    lo, hi = wilson_interval(0, 50)
+    assert lo >= 0.0 and hi > 0.0
