@@ -1121,13 +1121,18 @@ def _bracket_section(data: dict) -> str:
         f"длинные ли вечера, ночь это или прайм по Москве.",
         "",
         f"В наблюдение попали {data.get('n_watch', 0):,} аккаунтов из Divine-лобби. "
-        f"В полосе {mmr_lo}–{mmr_hi} осталось {data.get('n_in_band', 0):,}, "
+        f"В полосе {mmr_lo}–{mmr_hi} / Divine 4–5 осталось {data.get('n_in_band', 0):,}, "
         f"достаточно свежих игр — у {data.get('n_enough', 0):,}. "
         + (
-            f"Закрытых профилей на этом пути — {data.get('n_private', 0):,}: "
-            f"их историй нет, и они могут жить иначе, чем открытые."
-            if data.get("n_private")
-            else "Часть профилей закрыта: их историй нет."
+            lambda hidden: (
+                f"Пустых или закрытых историй на этом пути — {hidden:,}: "
+                f"эти люди могут жить иначе, чем открытые."
+                if hidden
+                else "Часть профилей закрыта: их историй нет."
+            )
+        )(
+            int(data.get("n_private") or 0)
+            + int((data.get("statuses") or {}).get("empty") or 0)
         ),
         "",
         "| Что смотрим | Слабые в этом пуле | Середина | Сильные в этом пуле |",
@@ -1153,33 +1158,76 @@ def _bracket_section(data: dict) -> str:
     if weak and strong:
         week = diff.get("per_week")
         night = diff.get("night_msk")
+        prime = diff.get("prime_msk")
+        weekend = diff.get("weekend")
         sess = diff.get("session_len")
-        bits = []
+        sameish = []
+        differs = []
         if week is not None and week == week:
-            word = "чаще" if week > 0 else "реже"
-            bits.append(
-                f"сильные запускают на {abs(week):.1f} каток в неделю {word}"
-            )
+            if abs(week) >= 2:
+                word = "чаще" if week > 0 else "реже"
+                differs.append(f"сильные запускают на {abs(week):.1f} каток в неделю {word}")
+            else:
+                sameish.append("сколько каток в неделю")
         if sess is not None and sess == sess:
-            word = "длиннее" if sess > 0 else "короче"
-            bits.append(f"вечер у них на {abs(sess):.1f} каток {word}")
+            if abs(sess) >= 0.8:
+                word = "длиннее" if sess > 0 else "короче"
+                differs.append(f"вечер у сильных на {abs(sess):.1f} каток {word}")
+            else:
+                sameish.append("длина вечера")
         if night is not None and night == night:
-            word = "больше" if night > 0 else "меньше"
-            bits.append(
-                f"доля ночных каток (0–5 МСК) у сильных на {abs(100 * night):.0f}% {word}"
+            if abs(night) >= 0.08:
+                word = "больше" if night > 0 else "меньше"
+                differs.append(
+                    f"доля ночных каток у сильных на {abs(100 * night):.0f}% {word}"
+                )
+            else:
+                sameish.append("ночь 0–5 МСК")
+        if prime is not None and prime == prime:
+            if abs(prime) >= 0.08:
+                word = "больше" if prime > 0 else "меньше"
+                differs.append(
+                    f"в прайм 18–22 МСК сильные сидят на {abs(100 * prime):.0f}% {word}"
+                )
+            else:
+                sameish.append("прайм 18–22 МСК")
+        if weekend is not None and weekend == weekend:
+            if abs(weekend) >= 0.08:
+                word = "чаще" if weekend > 0 else "реже"
+                differs.append(
+                    f"в выходные сильные играют на {abs(100 * weekend):.0f}% {word}"
+                )
+            else:
+                sameish.append("выходные")
+        lines += [""]
+        if not differs:
+            lines.append(
+                "Простыми словами: **по режиму жизни они почти не отличаются**. "
+                "И слабые, и сильные в этой полосе запускают примерно столько же "
+                "каток в неделю и сидят примерно теми же вечерами. Разница — "
+                "в самой игре (золото, смерти, винрейт), а не в том, во сколько "
+                "человек садится в поиск."
             )
-        if bits:
-            lines += [
-                "",
-                "Простыми словами: " + "; ".join(bits) + ".",
-            ]
+        else:
+            if sameish:
+                lines.append(
+                    "Простыми словами: частота и длина вечеров почти те же. "
+                    "Отличие — " + "; ".join(differs) + "."
+                )
+            else:
+                lines.append("Простыми словами: " + "; ".join(differs) + ".")
+            if sameish:
+                lines.append(
+                    "Совпало: " + ", ".join(sameish) + "."
+                )
         lines += [
             "",
             "Это не «подкрутка» и не закон вселенной. Это снимок публичных "
             "аккаунтов одной полосы: кто в ней выглядит слабее, а кто сильнее, "
             "и совпадает ли это с тем, *когда* они садятся в поиск. Если игроков "
-            f"мало (здесь слабых {weak.get('n', 0)}, сильных {strong.get('n', 0)}), "
-            "разница может быть шумом. Повторять стоит на большей выборке.",
+            f"мало (здесь слабых {int(weak.get('n') or 0)}, сильных "
+            f"{int(strong.get('n') or 0)}), разница в часах может быть шумом. "
+            "Повторять стоит на большей выборке.",
         ]
 
     if (data.get("hours") or {}) and weak and strong:
