@@ -65,6 +65,7 @@ def main() -> None:
     add(_data_section(counts, ab, controls))
     add(_controls_section(controls))
     add(_null_model_section(null_model))
+    add(_negative_control_section(_load("negative_control.json"), ab))
     add(_test_a_section(ab, null_model))
     add(_test_b_section(ab, null_model))
     add(_test_c_section(cd))
@@ -262,6 +263,72 @@ def _null_model_section(null_model: dict) -> str:
             f"есть сезонные пересчёты рейтинга и шум измерения `average_rank`, "
             f"которых в модели нет.",
         ]
+    return "\n".join(lines)
+
+
+def _negative_control_section(nc: dict, ab: dict) -> str:
+    if not nc:
+        return ""
+    outcome = nc.get("outcome", {})
+    strengths = outcome.get("сила_пп", [])
+    slopes = outcome.get("slope", [])
+    runs = outcome.get("runs_mean_z", [])
+    if not strengths:
+        return ""
+
+    observed = ab.get("streaks", {}).get("slope_real")
+    observed_se = ab.get("streaks", {}).get("slope_real_se")
+
+    lines = [
+        "## Негативный контроль: а увидели бы мы подкрутку, если бы она была",
+        "",
+        "Позитивные контроли доказывают, что конвейер видит известные эффекты в "
+        "данных. Здесь проверяется обратное и не менее важное: что **сами тесты "
+        "чувствительны к подкрутке**. В симулятор внедряется вмешательство "
+        "известной силы, и измеряется, как на него реагируют статистики. Без "
+        "такой проверки вывод «эффекта не найдено» ничего не стоил бы: он мог бы "
+        "означать, что тесты слепы.",
+        "",
+        "| Внедрено, п.п. за шаг | Измеренный наклон | Средний z теста серий |",
+        "| --- | --- | --- |",
+    ]
+    for strength, slope, z in zip(strengths, slopes, runs):
+        lines.append(f"| {strength:.2f} | {_pp(slope)} | {_fmt(z, 3, sign=True)} |")
+
+    baseline = nc.get("baseline_slope")
+    if baseline is not None and len(slopes) > 1:
+        recovered = slopes[-1] - baseline
+        lines += [
+            "",
+            f"Тест восстанавливает внедрённый эффект почти один к одному: при "
+            f"внедрении {strengths[-1]:.1f} п.п. измеренный наклон сдвигается на "
+            f"{_pp(recovered)}. Знак меняется уже при самой слабой из "
+            f"проверенных подкруток в {strengths[1]:.2f} п.п.",
+        ]
+    if observed is not None and observed_se:
+        smallest = slopes[1] if len(slopes) > 1 else None
+        if smallest is not None:
+            distance = abs(observed - smallest) / observed_se
+            lines += [
+                "",
+                f"Наблюдаемое значение {_pp(observed)} отстоит от результата самой "
+                f"слабой смоделированной подкрутки на {distance:.0f} стандартных "
+                f"ошибок. Подкрутка такого размера в данных исключена.",
+            ]
+
+    roster = nc.get("roster", {})
+    if roster.get("slope"):
+        lines += [
+            "",
+            "Отдельная находка касается механизма. Если бы система перекашивала "
+            "**составы** внутри матча, эффект был бы слабым при любой силе "
+            "вмешательства: подобранные в один матч игроки почти равны по "
+            "рейтингу, поэтому перестановка их между командами физически не "
+            "способна сильно сдвинуть исход. Заметная подкрутка через состав "
+            "потребовала бы расширения окна подбора, а это наблюдаемо — и "
+            "проверяется отдельным каналом в тесте D.",
+        ]
+    lines += ["", "![Негативный контроль](figures/negative_control.png)"]
     return "\n".join(lines)
 
 

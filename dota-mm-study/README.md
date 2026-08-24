@@ -28,15 +28,22 @@ API-ключ не требуется: всё работает на free tier. Е
 кэш HTTP-ответов лежит в `data/http_cache.sqlite`.
 
 ```bash
-python -m scripts.run_controls      # позитивные контроли на публичных матчах
-python -m scripts.harvest_seeds     # сбор account_id
-python -m scripts.crawl_players     # выгрузка историй игроков
-python -m scripts.detect_cohorts    # смурфы, слабые игроки, «жители рейтинга»
-python -m scripts.run_simulation    # честный матчмейкинг как нулевая модель
-python -m scripts.run_tests_ab      # тесты A и B
-python -m scripts.crawl_rosters     # выгрузка составов
-python -m scripts.run_tests_cd      # тесты C и D
-python -m scripts.build_report      # сборка отчёта
+python -m scripts.run_controls          # позитивные контроли на публичных матчах
+python -m scripts.harvest_seeds         # сбор account_id
+python -m scripts.crawl_players         # выгрузка историй игроков
+python -m scripts.crawl_rosters         # выгрузка составов
+python -m scripts.detect_cohorts        # смурфы, слабые игроки, «жители рейтинга»
+python -m scripts.run_simulation        # честный матчмейкинг как нулевая модель
+python -m scripts.run_negative_control  # проверка чувствительности самих тестов
+python -m scripts.run_tests_ab          # тесты A и B
+python -m scripts.run_tests_cd          # тесты C и D
+python -m scripts.build_report          # сборка отчёта
+```
+
+Тесты оценщиков (проверяют статистики на данных с известным ответом):
+
+```bash
+python -m pytest tests/ -q
 ```
 
 ## Структура
@@ -50,8 +57,23 @@ python -m scripts.build_report      # сборка отчёта
 | `dota_study/smurf.py` | детекторы смурфов и слабых игроков |
 | `dota_study/stats/` | статистические тесты |
 | `dota_study/sim/fair_mm.py` | симулятор честного матчмейкинга |
+| `dota_study/sim/calibrate.py` | калибровка нулевой модели по данным |
+| `dota_study/sim/rigged_mm.py` | симулятор с внедрённой подкруткой |
 | `scripts/` | исполняемые этапы конвейера |
+| `tests/` | проверка оценщиков на данных с известным ответом |
 | `reports/` | отчёт и графики |
+
+## Как устроена проверка
+
+Три уровня контроля, без которых вывод об отсутствии эффекта не имел бы силы:
+
+1. **Позитивные контроли** — конвейер обязан воспроизводить заведомо
+   существующие эффекты (перевес Radiant, различия винрейтов героев).
+2. **Нулевая модель** — честная рейтинговая система сама даёт и сходимость к
+   50%, и зависимость исхода от серии, поэтому наблюдения сравниваются с ней, а
+   не с нулём. Её единственный свободный параметр калибруется по данным.
+3. **Негативный контроль** — в симулятор внедряется подкрутка известной силы, и
+   проверяется, что тесты её находят.
 
 ## Ограничения данных
 
