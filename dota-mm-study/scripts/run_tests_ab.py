@@ -12,7 +12,6 @@ import pandas as pd
 from dota_study import db, features
 from dota_study.config import DATA_DIR
 from dota_study.plotting import ACCENT, MUTED, NEUTRAL, save
-from dota_study.sim.fair_mm import SimConfig, simulate, to_frame
 from dota_study.stats import dispersion, streaks
 
 log = logging.getLogger("tests_ab")
@@ -70,22 +69,19 @@ def main() -> None:
         _log_dispersion("без смурфов", disp_clean)
         results["dispersion_no_smurf"] = _disp_dict(disp_clean)
 
-    # Та же статистика в заведомо честной системе.
-    sim = simulate(SimConfig(n_players=6000, n_rounds=int(max(tallies["size"].mean(), 200))))
-    sim_n = np.bincount(sim.player_id)
-    sim_w = np.bincount(sim.player_id, weights=sim.win)
-    keep = sim_n >= args.min_games
-    disp_sim = dispersion.analyse(sim_w[keep], sim_n[keep], n_boot=min(args.boot, 800))
-    _log_dispersion("симуляция честного MM", disp_sim)
-    results["dispersion_sim"] = _disp_dict(disp_sim)
+    # Нулевая модель берётся из отдельного этапа: она откалибрована по данным
+    # и знает, какой диапазон значений честная система вообще способна выдать.
+    null_model = _load_null_model()
+    if null_model:
+        log.info(
+            "  честная система способна дать phi в диапазоне [%.2f, %.2f]",
+            *null_model["fair_phi_range"],
+        )
+        results["null_model"] = null_model
 
     db.record_finding(
         conn, "A_dispersion", "phi_real", disp_real.phi, disp_real.phi_lo, disp_real.phi_hi,
         disp_real.n_players, disp_real.verdict(),
-    )
-    db.record_finding(
-        conn, "A_dispersion", "phi_sim", disp_sim.phi, disp_sim.phi_lo, disp_sim.phi_hi,
-        disp_sim.n_players, "нулевая модель",
     )
     db.record_finding(
         conn, "A_dispersion", "true_winrate_sd", disp_real.true_sd, n=disp_real.n_players,
@@ -114,18 +110,34 @@ def main() -> None:
         fe_real_nc.se[0],
     )
 
-    sim_df = features.add_streaks(to_frame(sim))
-    fe_sim = streaks.streak_slope(sim_df, max_streak=args.max_streak, controls=False)
-    log.info("наклон (честная симуляция): %+.5f ± %.5f", fe_sim.coef[0], fe_sim.se[0])
+    if null_model:
+        fitted_slope = null_model["fitted_slope"]
+        fitted_se = null_model["fitted_slope_se"]
+        log.info(
+            "наклон (честная модель, откалиброванная по разбросу винрейтов): %+.5f ± %.5f",
+            fitted_slope,
+            fitted_se,
+        )
+        log.info(
+            "наклон, достижимый честной системой в принципе: от %+.5f до %+.5f",
+            *null_model["fair_slope_range"],
+        )
+        diff = float(fe_real_nc.coef[0] - fitted_slope)
+        se_diff = float(np.sqrt(fe_real_nc.se[0] ** 2 + fitted_se**2))
+        z = diff / se_diff if se_diff > 0 else np.nan
+        from scipy import stats as sps
 
-    comparison = streaks.StreakComparison(real=fe_real_nc, simulated=fe_sim)
-    log.info(
-        "разница реальность минус честная модель: %+.5f ± %.5f, z=%.2f, p=%.4f",
-        comparison.diff,
-        comparison.se_diff,
-        comparison.z,
-        comparison.p_value,
-    )
+        p_diff = float(2 * sps.norm.sf(abs(z)))
+        log.info(
+            "разница реальность минус честная модель: %+.5f ± %.5f, z=%.2f, p=%.3g",
+            diff,
+            se_diff,
+            z,
+            p_diff,
+        )
+    else:
+        fitted_slope = fitted_se = diff = se_diff = p_diff = float("nan")
+        log.warning("нулевая модель не найдена, сначала выполните scripts.run_simulation")
 
     # Индикаторы серий: асимметрия побед и поражений — признак гипотезы H_engage.
     y, X, groups, names = streaks.streak_design(sample, max_streak=args.max_streak)
@@ -135,10 +147,19 @@ def main() -> None:
         if name.startswith("streak_"):
             log.info("  %-12s %+.5f ± %.5f (p=%.3f)", name, *ind[name])
 
-    asym = _asymmetry(fe_ind, args.max_streak)
+    fe_asym, asym = streaks.asymmetric_slopes(sample, max_streak=args.max_streak)
+    asym_coefs = fe_asym.as_dict()
     log.info(
-        "асимметрия побед и поражений: %+.5f ± %.5f (p=%.3f)",
-        asym["value"],
+        "  наклон после побед:     %+.5f ± %.5f",
+        *asym_coefs["slope_after_wins"][:2],
+    )
+    log.info(
+        "  наклон после поражений: %+.5f ± %.5f",
+        *asym_coefs["slope_after_losses"][:2],
+    )
+    log.info(
+        "асимметрия побед и поражений: %+.5f ± %.5f (p=%.4f)",
+        asym["difference"],
         asym["se"],
         asym["p"],
     )
@@ -151,29 +172,33 @@ def main() -> None:
         runs.get("combined_z", float("nan")),
         runs.get("p_value", float("nan")),
     )
-    runs_sim = streaks.runs_test(sim_df)
     log.info(
-        "runs-тест (честная симуляция): средний z %+.3f",
-        runs_sim.get("mean_z", float("nan")),
+        "  отрицательный z означает более длинные серии, чем при случайности; "
+        "подкрутка предсказывает противоположный знак"
     )
 
     for test, metric, res in (
         ("B_streaks", "slope_real", fe_real_nc.coef[0]),
         ("B_streaks", "slope_real_controlled", fe_real.coef[0]),
-        ("B_streaks", "slope_sim", fe_sim.coef[0]),
-        ("B_streaks", "slope_diff", comparison.diff),
+        ("B_streaks", "slope_null_model", fitted_slope),
+        ("B_streaks", "slope_diff", diff),
     ):
         db.record_finding(conn, test, metric, float(res), n=len(sample))
     db.record_finding(
-        conn, "B_streaks", "slope_diff_p", comparison.p_value, n=len(sample),
-        note="реальность против честной модели",
+        conn, "B_streaks", "slope_diff_p", p_diff, n=len(sample),
+        note="реальность против откалиброванной честной модели",
     )
     db.record_finding(
-        conn, "B_streaks", "asymmetry", asym["value"], n=len(sample), note=f"p={asym['p']:.4f}"
+        conn,
+        "B_streaks",
+        "asymmetry",
+        asym["difference"],
+        n=len(sample),
+        note=f"наклон после побед минус после поражений, p={asym['p']:.4f}",
     )
     db.record_finding(
         conn, "B_streaks", "runs_mean_z", runs.get("mean_z"), n=runs.get("n_players"),
-        note=f"честная модель {runs_sim.get('mean_z', float('nan')):+.3f}",
+        note="отрицательный знак означает более длинные серии, чем при случайности",
     )
 
     results["streaks"] = {
@@ -188,15 +213,16 @@ def main() -> None:
         "slope_real_se": float(fe_real_nc.se[0]),
         "slope_real_controlled": float(fe_real.coef[0]),
         "slope_real_controlled_se": float(fe_real.se[0]),
-        "slope_sim": float(fe_sim.coef[0]),
-        "slope_sim_se": float(fe_sim.se[0]),
-        "diff": comparison.diff,
-        "diff_se": comparison.se_diff,
-        "diff_p": comparison.p_value,
+        "slope_null_model": float(fitted_slope),
+        "slope_null_model_se": float(fitted_se),
+        "diff": float(diff),
+        "diff_se": float(se_diff),
+        "diff_p": float(p_diff),
         "indicators": {k: v for k, v in ind.items() if k.startswith("streak_")},
         "asymmetry": asym,
+        "slope_after_wins": list(asym_coefs["slope_after_wins"]),
+        "slope_after_losses": list(asym_coefs["slope_after_losses"]),
         "runs": runs,
-        "runs_sim": runs_sim,
         "n_obs": int(len(sample)),
         "n_players": int(sample["account_id"].nunique()),
     }
@@ -204,20 +230,15 @@ def main() -> None:
     (DATA_DIR / "tests_ab.json").write_text(
         json.dumps(results, ensure_ascii=False, indent=1, default=float)
     )
-    _plot(tallies, disp_real, disp_sim, curve, fe_ind, names, sim_df)
+    _plot(tallies, disp_real, null_model, curve, fe_ind, names)
     log.info("готово")
 
 
-def _asymmetry(fe: streaks.FEResult, max_streak: int) -> dict[str, float]:
-    """Сумма коэффициентов симметричных серий: при симметрии эффекта равна нулю."""
-    from scipy import stats as sps
-
-    idx_pos = [fe.names.index(f"streak_{k:+d}") for k in range(1, max_streak + 1)]
-    idx_neg = [fe.names.index(f"streak_{-k:+d}") for k in range(1, max_streak + 1)]
-    value = float(fe.coef[idx_pos].sum() + fe.coef[idx_neg].sum())
-    se = float(np.sqrt((fe.se[idx_pos] ** 2).sum() + (fe.se[idx_neg] ** 2).sum()))
-    z = value / se if se > 0 else np.nan
-    return {"value": value, "se": se, "p": float(2 * sps.norm.sf(abs(z)))}
+def _load_null_model() -> dict | None:
+    path = DATA_DIR / "simulation.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
 
 
 def _disp_dict(res: dispersion.DispersionResult) -> dict[str, object]:
@@ -251,7 +272,7 @@ def _log_dispersion(title: str, res: dispersion.DispersionResult) -> None:
     )
 
 
-def _plot(tallies, disp_real, disp_sim, curve, fe_ind, names, sim_df) -> None:
+def _plot(tallies, disp_real, null_model, curve, fe_ind, names) -> None:
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.8))
@@ -262,11 +283,12 @@ def _plot(tallies, disp_real, disp_sim, curve, fe_ind, names, sim_df) -> None:
     grid = np.linspace(rates.min(), rates.max(), 200)
     binom_pdf = np.exp(-0.5 * ((grid - disp_real.mean_winrate) / disp_real.binomial_sd) ** 2)
     binom_pdf /= binom_pdf.sum() * (grid[1] - grid[0])
-    ax.plot(grid, binom_pdf, color=ACCENT, lw=1.6, label="чистая случайность")
+    ax.plot(grid, binom_pdf, color=ACCENT, lw=1.6, label="если бы исход был чистой монеткой")
     ax.axvline(0.5, color=MUTED, ls="--", lw=1)
     ax.set_xlabel("карьерный винрейт")
     ax.set_title(
-        f"Тест A: разброс винрейтов\nphi={disp_real.phi:.2f} против {disp_sim.phi:.2f} в честной модели"
+        f"Тест A: разброс винрейтов\nphi={disp_real.phi:.2f}, "
+        f"жёсткая подкрутка требует phi<1"
     )
     ax.legend(fontsize=7)
 

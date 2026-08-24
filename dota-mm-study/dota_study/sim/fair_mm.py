@@ -40,8 +40,13 @@ class SimConfig:
     # Постоянное преимущество стороны Radiant, чтобы симуляция была сопоставима
     # с реальными данными, где оно составляет около трёх процентных пунктов.
     side_bias: float = 0.12
-    # Доля игроков, участвующих в раунде.
-    participation: float = 1.0
+    # Доля игроков, участвующих в раунде. Строго меньше единицы, иначе разброс
+    # активности не проявляется: при полном участии у всех одинаковая история.
+    participation: float = 0.35
+    # Разброс игровой активности. Без него у всех была бы одинаковая длина
+    # истории, тогда как в реальности она различается на порядки, а от неё
+    # зависит и точность рейтинга, и биномиальный шум винрейта.
+    activity_sd: float = 0.9
     seed: int = 20260824
     # Насколько подбор балансирует команды: 'snake' раскладывает отсортированных
     # по рейтингу игроков так, чтобы суммы были близки, 'random' — случайно.
@@ -53,6 +58,7 @@ class SimResult:
     player_id: np.ndarray
     win: np.ndarray
     round_id: np.ndarray
+    match_rating: np.ndarray
     rating: np.ndarray
     true_skill: np.ndarray
     config: SimConfig = field(repr=False, default_factory=SimConfig)
@@ -96,16 +102,21 @@ def simulate(config: SimConfig | None = None) -> SimResult:
     n_matches_round = per_round // 10
     total = cfg.n_rounds * per_round
 
+    # Логарифм веса активности: кто-то играет каждый вечер, кто-то раз в месяц.
+    log_activity = rng.normal(0.0, cfg.activity_sd, cfg.n_players)
+
     out_player = np.empty(total, dtype=np.int32)
     out_win = np.empty(total, dtype=np.int8)
     out_round = np.empty(total, dtype=np.int32)
+    out_match_rating = np.empty(total, dtype=np.float32)
     cursor = 0
 
     for rnd in range(cfg.n_rounds):
-        if cfg.participation < 1.0:
-            pool = rng.choice(cfg.n_players, per_round, replace=False)
-        else:
-            pool = rng.permutation(cfg.n_players)[:per_round]
+        # Взвешенный отбор без возвращения через трюк Гумбеля: прибавляем к
+        # логарифму веса гумбелев шум и берём верхние k. Это точная выборка и
+        # работает за один проход, в отличие от последовательного отбора.
+        keys = log_activity + rng.gumbel(0.0, 1.0, cfg.n_players)
+        pool = np.argpartition(-keys, per_round - 1)[:per_round]
 
         # Подбор смотрит только на рейтинг: сортируем очередь по зашумлённому
         # рейтингу и нарезаем подряд идущими десятками.
@@ -135,10 +146,15 @@ def simulate(config: SimConfig | None = None) -> SimResult:
         delta = np.where(radiant_mask, delta_radiant[:, None], -delta_radiant[:, None])
         np.add.at(rating, blocks.ravel(), delta.ravel())
 
+        # Средний рейтинг матча — прямой аналог поля average_rank в реальных
+        # данных, поэтому на нём можно калибровать симулятор.
+        match_rating = (radiant_rating + dire_rating) / 10.0
+
         flat = blocks.ravel()
         out_player[cursor : cursor + per_round] = flat
         out_win[cursor : cursor + per_round] = player_win.ravel().astype(np.int8)
         out_round[cursor : cursor + per_round] = rnd
+        out_match_rating[cursor : cursor + per_round] = np.repeat(match_rating, 10)
         cursor += per_round
 
         if cfg.skill_drift:
@@ -148,6 +164,7 @@ def simulate(config: SimConfig | None = None) -> SimResult:
         player_id=out_player[:cursor],
         win=out_win[:cursor],
         round_id=out_round[:cursor],
+        match_rating=out_match_rating[:cursor],
         rating=rating,
         true_skill=true_skill,
         config=cfg,
@@ -163,6 +180,7 @@ def to_frame(result: SimResult):
             "account_id": result.player_id.astype(np.int64),
             "win": result.win.astype(np.int64),
             "start_time": result.round_id.astype(np.int64) * 3600,
+            "average_rank": result.match_rating.astype(np.float64),
         }
     )
     return df.sort_values(["account_id", "start_time"], kind="stable").reset_index(drop=True)

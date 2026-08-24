@@ -19,7 +19,12 @@ import pandas as pd
 from .config import MIN_DURATION_SEC, STUDY_WINDOW_START
 
 SESSION_GAP_SEC = 3 * 3600
-ABANDON_STATUS = 2
+
+# Любой ненулевой leaver_status означает, что игрок покинул матч. Это видно и по
+# данным: при статусе 0 доля побед составляет 50.5%, при статусе 1 — всего 3.7%.
+# Такие матчи исключаются из основных тестов: их исход определён выходом игрока,
+# а не подбором соперников.
+ABANDON_STATUS = 1
 
 
 def load_player_matches(

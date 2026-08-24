@@ -134,18 +134,24 @@ def streak_design(
     df: pd.DataFrame,
     max_streak: int = 4,
     controls: bool = True,
+    reference: int = -1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """Строит матрицу плана: индикаторы серий плюс контроли.
 
-    Базовая категория — матчи без предшествующей серии, то есть первые матчи
-    игрока. Индикаторы, а не линейный член, позволяют увидеть асимметрию между
-    сериями побед и поражений, которую предсказывает гипотеза H_engage.
+    Индикаторы, а не линейный член, позволяют увидеть асимметрию между сериями
+    побед и поражений, которую предсказывает гипотеза H_engage.
+
+    Базовой категорией берётся серия из одного поражения — одна из самых
+    населённых ячеек. Использовать в этой роли нулевую серию нельзя: она
+    встречается только в самом первом матче игрока, и оценки относительно почти
+    пустой ячейки имели бы бессмысленно широкие интервалы.
     """
+    df = df[df["prev_streak"] != 0]
     clipped = df["prev_streak"].clip(-max_streak, max_streak).to_numpy()
     columns: list[np.ndarray] = []
     names: list[str] = []
     for k in range(-max_streak, max_streak + 1):
-        if k == 0:
+        if k == 0 or k == reference:
             continue
         columns.append((clipped == k).astype(float))
         names.append(f"streak_{k:+d}")
@@ -192,6 +198,51 @@ def streak_slope(
     return fixed_effects_lpm(
         df["win"].to_numpy(dtype=float), X, df["account_id"].to_numpy(), names
     )
+
+
+def asymmetric_slopes(
+    df: pd.DataFrame, max_streak: int = 4, controls: bool = True
+) -> tuple[FEResult, dict[str, float]]:
+    """Отдельные наклоны для серий побед и серий поражений.
+
+    Гипотеза H_engage предсказывает именно асимметрию: система «наказывает» за
+    победную серию и «выручает» после серии поражений, а значит два наклона
+    должны различаться. Симметричный эффект такой формы не имеет.
+    """
+    from scipy import stats as sps
+
+    data = df[df["prev_streak"] != 0]
+    clipped = data["prev_streak"].clip(-max_streak, max_streak).to_numpy(dtype=float)
+    columns = [np.maximum(clipped, 0.0), np.minimum(clipped, 0.0)]
+    names = ["slope_after_wins", "slope_after_losses"]
+
+    if controls:
+        for name in ("rank_delta", "party_size", "session_pos"):
+            if name not in data:
+                continue
+            values = pd.to_numeric(data[name], errors="coerce").to_numpy(dtype=float)
+            if np.all(np.isnan(values)):
+                continue
+            columns.append(np.nan_to_num(values, nan=float(np.nanmean(values))))
+            names.append(name)
+
+    fe = fixed_effects_lpm(
+        data["win"].to_numpy(dtype=float),
+        np.column_stack(columns),
+        data["account_id"].to_numpy(),
+        names,
+    )
+    i_pos = fe.names.index("slope_after_wins")
+    i_neg = fe.names.index("slope_after_losses")
+    diff = float(fe.coef[i_pos] - fe.coef[i_neg])
+    se = float(np.sqrt(fe.se[i_pos] ** 2 + fe.se[i_neg] ** 2))
+    z = diff / se if se > 0 else np.nan
+    return fe, {
+        "difference": diff,
+        "se": se,
+        "z": float(z),
+        "p": float(2 * sps.norm.sf(abs(z))),
+    }
 
 
 def runs_test(df: pd.DataFrame, min_games: int = 100) -> dict[str, float]:

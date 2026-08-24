@@ -16,10 +16,16 @@ STUDY_DB = DATA_DIR / "study.sqlite"
 API_BASE = "https://api.opendota.com/api"
 API_KEY = os.environ.get("OPENDOTA_API_KEY") or None
 
-# Free tier: 60 запросов в минуту, порядка 2000-3000 в сутки. Держим запас,
-# чтобы не упереться в 429 на границе окна.
+# Ограничение в 60 запросов в минуту заявлено в документации и реально
+# соблюдается сервером, поэтому держим строгий запас под ним.
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("DOTA_STUDY_RPM", "50"))
-DAILY_BUDGET = int(os.environ.get("DOTA_STUDY_DAILY_BUDGET", "2900"))
+
+# Суточный лимит на практике оказался мягким: заголовок
+# x-rate-limit-remaining-day почти не убывал на протяжении тысяч запросов.
+# Бюджет здесь — это самоограничение, а не отражение серверного лимита. Он
+# выставлен ровно настолько, чтобы набрать предрегистрированный объём выборки,
+# при сохранении вежливого темпа запросов.
+DAILY_BUDGET = int(os.environ.get("DOTA_STUDY_DAILY_BUDGET", "7000"))
 
 # Ranked matchmaking, только он влияет на MMR.
 LOBBY_RANKED = 7
