@@ -317,9 +317,10 @@ def test_binary_scan_recovers_a_known_side_effect() -> None:
     assert result["within"] == pytest.approx(0.08, abs=0.03)
 
 
-def test_mmr_band_prefers_computed_mmr() -> None:
+def test_mmr_band_accepts_mmr_or_divine_medal() -> None:
     assert bracket.in_mmr_band(4800, 50) is True
-    assert bracket.in_mmr_band(3000, 75) is False
+    assert bracket.in_mmr_band(3000, 75) is True
+    assert bracket.in_mmr_band(3000, 60) is False
     assert bracket.in_mmr_band(None, 76) is True
     assert bracket.in_mmr_band(None, 60) is False
 

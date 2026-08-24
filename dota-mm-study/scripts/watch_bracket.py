@@ -44,6 +44,7 @@ def main() -> None:
     _import_existing_divine(conn)
     if not args.skip_probe:
         _probe(client, conn)
+    _recompute_in_band(conn)
     if not args.skip_crawl:
         _crawl(client, conn, args)
     results = _analyse(conn)
@@ -194,6 +195,24 @@ def _crawl(client: OpenDotaClient, conn, args) -> None:
         if ok % 20 == 0:
             log.info("историй сохранено %d, бюджет %d", ok, client.budget_left())
     log.info("новых историй: %d", ok)
+
+
+def _recompute_in_band(conn) -> None:
+    """Пересчитать полосу по уже известным MMR и медалям, без новых запросов."""
+    rows = conn.execute(
+        "SELECT account_id, computed_mmr, rank_tier FROM bracket_watch"
+    ).fetchall()
+    for row in rows:
+        flag = int(bracket.in_mmr_band(row["computed_mmr"], row["rank_tier"]))
+        conn.execute(
+            "UPDATE bracket_watch SET in_band=? WHERE account_id=?",
+            (flag, row["account_id"]),
+        )
+    conn.commit()
+    inside = conn.execute(
+        "SELECT count(*) FROM bracket_watch WHERE in_band = 1"
+    ).fetchone()[0]
+    log.info("после пересчёта в полосе: %d", inside)
 
 
 def _import_existing_divine(conn) -> None:

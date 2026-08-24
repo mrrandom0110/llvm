@@ -51,8 +51,14 @@ def extract_mmr(info: dict | None) -> tuple[float | None, int | None]:
 
 
 def in_mmr_band(mmr: float | None, rank_tier: int | None) -> bool:
-    if mmr is not None and np.isfinite(mmr):
-        return MMR_LO <= float(mmr) <= MMR_HI
+    """Полоса «этот номер»: MMR 4600–5000 или медаль Divine 4–5.
+
+    OpenDota часто рисует Divine 4–5 как 4200–4500, поэтому медаль не
+    выкидываем, если оценка MMR чуть ниже нижней границы. Иначе в пуле
+    остаются единицы.
+    """
+    if mmr is not None and np.isfinite(mmr) and MMR_LO <= float(mmr) <= MMR_HI:
+        return True
     if rank_tier is None:
         return False
     return TIER_LO <= int(rank_tier) <= TIER_HI

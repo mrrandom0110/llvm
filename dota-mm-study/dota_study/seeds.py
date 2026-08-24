@@ -88,8 +88,8 @@ from public_matches
 where start_time >= {lo} and start_time < {hi}
   and lobby_type = {lobby}
   and duration > 900
-  and avg_rank_tier >= 70
-  and avg_rank_tier < 80
+  and avg_rank_tier >= 74
+  and avg_rank_tier < 81
 order by random()
 limit {limit}
 """
