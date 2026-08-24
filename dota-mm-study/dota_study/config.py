@@ -18,7 +18,7 @@ API_KEY = os.environ.get("OPENDOTA_API_KEY") or None
 
 # Ограничение в 60 запросов в минуту заявлено в документации и реально
 # соблюдается сервером, поэтому держим строгий запас под ним.
-RATE_LIMIT_PER_MINUTE = int(os.environ.get("DOTA_STUDY_RPM", "50"))
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("DOTA_STUDY_RPM", "40"))
 
 # Суточный лимит на практике оказался мягким: заголовок
 # x-rate-limit-remaining-day почти не убывал на протяжении тысяч запросов.

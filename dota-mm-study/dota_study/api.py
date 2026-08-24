@@ -89,15 +89,21 @@ class OpenDotaClient:
     # -- ограничение скорости -------------------------------------------
 
     def _throttle(self) -> None:
-        now = time.monotonic()
-        while self._recent and now - self._recent[0] > 60:
-            self._recent.popleft()
-        if len(self._recent) >= self.rpm:
+        while True:
+            now = time.monotonic()
+            while self._recent and now - self._recent[0] > 60:
+                self._recent.popleft()
+            if len(self._recent) < self.rpm:
+                break
             sleep_for = 60 - (now - self._recent[0]) + 0.25
-            if sleep_for > 0:
-                log.debug("rate limit: пауза %.1f с", sleep_for)
-                time.sleep(sleep_for)
+            if sleep_for <= 0:
+                break
+            time.sleep(sleep_for)
         self._recent.append(time.monotonic())
+
+    def _backoff(self, floor: int = 8) -> None:
+        """Снижает собственный лимит после отказа сервера."""
+        self.rpm = max(floor, int(self.rpm * 0.6))
 
     # -- запросы ---------------------------------------------------------
 
@@ -173,8 +179,25 @@ class OpenDotaClient:
                 self.stats["errors"] += 1
                 if self.remaining_day == 0:
                     raise QuotaExhausted("сервер сообщил, что суточный лимит исчерпан")
-                time.sleep(max(delay, 15.0))
+                # Сервер лучше нас знает, какой темп он готов выдержать, поэтому
+                # при отказе снижаем собственный лимит, а не только ждём. Иначе
+                # выгрузка будет циклически упираться в ту же стену.
+                self._backoff()
+                retry_after = response.headers.get("retry-after")
+                wait = float(retry_after) if (retry_after or "").isdigit() else max(delay, 15.0)
+                log.warning(
+                    "429 на %s: пауза %.0f с, темп снижен до %d запросов в минуту",
+                    key,
+                    wait,
+                    self.rpm,
+                )
+                time.sleep(wait)
                 delay *= 2
+                if attempt == retries:
+                    # Исчерпав попытки, не помечаем запрос неудачным: это не
+                    # свойство данных, а наш собственный перебор с темпом.
+                    # Останавливаем выгрузку, её можно продолжить позже.
+                    raise QuotaExhausted(f"сервер устойчиво отвечает 429 на {key}")
                 continue
 
             if response.status_code in (500, 502, 503, 504):

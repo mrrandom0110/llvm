@@ -90,18 +90,50 @@ def main() -> None:
     client.close()
 
 
-def _stratified_pick(pool: pd.DataFrame, budget: int, min_streak: int) -> pd.DataFrame:
-    """Равные доли на каждую величину серии, чтобы крайние ячейки не пустовали."""
+def _stratified_pick(
+    pool: pd.DataFrame, budget: int, min_streak: int, per_player: int = 6
+) -> pd.DataFrame:
+    """Отбор блоками по игрокам, а не по отдельным матчам.
+
+    Ключевое требование теста C — сравнивать матчи одного и того же человека
+    между собой. Если брать по одному матчу у каждого игрока, фиксированные
+    эффекты оценить невозможно и весь эффект серии смешается с различиями между
+    людьми. Поэтому у каждого отобранного игрока берётся несколько матчей с
+    разными сериями: и после побед, и после поражений.
+    """
     pool = pool.copy()
     pool["cell"] = pool["prev_streak"].clip(-4, 4)
-    cells = sorted(c for c in pool["cell"].unique() if abs(c) >= min_streak)
-    per_cell = max(budget // max(len(cells), 1), 1)
+    pool["side"] = np.sign(pool["prev_streak"])
+
+    # Годятся только те, у кого есть матчи и после побед, и после поражений:
+    # иначе внутри игрока не будет разброса объясняющей переменной.
+    sides = pool.groupby("account_id")["side"].nunique()
+    eligible = sides[sides >= 2].index
+    pool = pool[pool["account_id"].isin(eligible)]
+    if pool.empty:
+        return pool
+
+    n_players = max(budget // per_player, 1)
     rng = np.random.default_rng(11)
+    candidates = pool["account_id"].drop_duplicates()
+    chosen = candidates.sample(min(n_players, len(candidates)), random_state=7)
+
     picks = []
-    for cell in cells:
-        subset = pool[pool["cell"] == cell]
-        take = min(per_cell, len(subset))
-        picks.append(subset.sample(take, random_state=int(rng.integers(1e6))))
+    for account_id in chosen:
+        subset = pool[pool["account_id"] == account_id]
+        # Внутри игрока балансируем победные и проигрышные серии.
+        half = max(per_player // 2, 1)
+        for side in (1, -1):
+            side_subset = subset[subset["side"] == side]
+            if side_subset.empty:
+                continue
+            picks.append(
+                side_subset.sample(
+                    min(half, len(side_subset)), random_state=int(rng.integers(1e6))
+                )
+            )
+    if not picks:
+        return pool.head(0)
     out = pd.concat(picks).drop_duplicates("match_id")
     return out.sample(frac=1.0, random_state=5).head(budget)
 
