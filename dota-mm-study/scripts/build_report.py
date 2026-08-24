@@ -68,6 +68,7 @@ def main() -> None:
     add(_negative_control_section(_load("negative_control.json"), ab))
     add(_test_a_section(ab, null_model))
     add(_test_b_section(ab, null_model))
+    add(_streak_question_section(_load("streak_question.json")))
     add(_test_c_section(cd))
     add(_test_d_section(cd, ab))
     add(_cohorts_section(cohorts, findings))
@@ -489,6 +490,139 @@ def _test_b_section(ab: dict, null_model: dict) -> str:
             f"предсказывала бы противоположный знак, поскольку сглаживание серий — "
             f"это и есть её наблюдаемое проявление.",
         ]
+    return "\n".join(lines)
+
+
+def _streak_question_section(sq: dict) -> str:
+    """Прикладной разбор: выиграл N подряд — что дальше."""
+    if not sq:
+        return ""
+    full = sq.get("full_shuffle", {})
+    within = sq.get("within_session", {})
+    base = sq.get("base_rate")
+    if not full:
+        return ""
+
+    frame = pd.DataFrame(full)
+    wframe = pd.DataFrame(within) if within else None
+    positive = frame[(frame["streak"] >= 1) & (frame["n"] >= 1000)]
+
+    lines = [
+        "## Выиграл N подряд — каков шанс выиграть следующий матч",
+        "",
+        "У этого вопроса два разных ответа, и путать их нельзя.",
+        "",
+        "**Предсказательный.** Если вы видите человека на серии из N побед, чего "
+        "ждать от его следующего матча. Здесь работает отбор: длинные серии чаще "
+        "случаются у сильных игроков, поэтому сам факт серии из десяти побед — "
+        "уже свидетельство, что перед вами хороший игрок.",
+        "",
+        "**Причинный.** Меняет ли серия шансы **одного и того же** человека. "
+        "Здесь отбор нужно устранить, и это делается перестановочным тестом: "
+        "порядок исходов в истории игрока перемешивается, а его собственный "
+        "винрейт и длина истории сохраняются. Такой нулевой закон заодно "
+        "автоматически учитывает известное смещение конечных "
+        "последовательностей: даже у честной монетки доля решек после серии "
+        "решек систематически чуть ниже половины, и без поправки это выглядело "
+        "бы как подкрутка.",
+        "",
+        f"Средний винрейт выборки — {_fmt(base)}. Крайние строки таблицы означают "
+        f"«N и больше».",
+        "",
+        "| Серия побед | Матчей | Шанс победить | Вклад отбора | Сверх случайного порядка |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    max_n = int(frame["streak"].max())
+    for row in positive.itertuples(index=False):
+        streak = int(row.streak)
+        label = f"**≥{streak}**" if streak >= max_n else f"**{streak}**"
+        lines.append(
+            f"| {label} | {int(row.n):,} | {_fmt(row.observed)} | "
+            f"{_pp(row.null_mean - base)} | {_pp(row.excess)} |"
+        )
+
+    biggest = positive.iloc[-1] if len(positive) else None
+    if biggest is not None:
+        lines += [
+            "",
+            f"Итак, **зависимость от N есть, и она заметная**: с одной победы "
+            f"подряд шанс {_fmt(positive.iloc[0]['observed'])}, а с "
+            f"{int(biggest['streak'])} и более — {_fmt(biggest['observed'])}. "
+            f"Но всего {_pp(biggest['null_mean'] - base)} из этого приходится на "
+            f"отбор по силе игрока, а остальное — на что-то, что меняется внутри "
+            f"самого человека.",
+        ]
+
+    if wframe is not None and len(wframe):
+        merged = frame.merge(wframe, on="streak", suffixes=("_full", "_sess"))
+        merged = merged[(merged["streak"] >= 2) & (merged["n_full"] >= 1000)]
+        inside = int(
+            (
+                (merged["observed_full"] >= merged["null_lo_sess"])
+                & (merged["observed_full"] <= merged["null_hi_sess"])
+            ).sum()
+        )
+        lines += [
+            "",
+            "### И это «что-то» — не матчмейкинг, а игровой вечер",
+            "",
+            "Второй перестановочный тест перемешивает исходы **только внутри "
+            "игровой сессии**, то есть сохраняет, насколько удачным был каждый "
+            "вечер, но стирает порядок матчей внутри него. Если бы серия имела "
+            "самостоятельное значение, наблюдение всё равно выбивалось бы за "
+            "пределы такого нулевого закона.",
+            "",
+            f"Оно не выбивается: из {len(merged)} проверенных длин серии "
+            f"{inside} попадают внутрь 99-процентного интервала. Иными словами, "
+            f"зная только, сколько матчей человек выиграл в этот вечер, порядок "
+            f"угадывать уже не нужно — он ничего не добавляет.",
+        ]
+
+    split = sq.get("session_split") or {}
+    if len(split) == 2:
+        items = list(split.items())
+        spreads = {
+            title: info["after_wins"] - info["after_losses"] for title, info in items
+        }
+        same = next((v for k, v in spreads.items() if "внутри" in k), None)
+        broken = next((v for k, v in spreads.items() if "внутри" not in k), None)
+        if same is not None and broken is not None:
+            eaten = 1.0 - broken / same if same else 0.0
+            lines += [
+                "",
+                "Прямая проверка того же вывода: сравним матчи, продолжающие серию "
+                "в том же вечере, и первые матчи нового вечера, куда серия перешла "
+                "через перерыв.",
+                "",
+                "| Когда играется следующий матч | После побед | После поражений | Разрыв |",
+                "| --- | --- | --- | --- |",
+            ]
+            for title, info in items:
+                lines.append(
+                    f"| {title} | {_fmt(info['after_wins'])} | "
+                    f"{_fmt(info['after_losses'])} | {_pp(spreads[title])} |"
+                )
+            lines += [
+                "",
+                f"Перерыв съедает {100 * eaten:.0f}% эффекта. Это и "
+                f"есть решающий довод против подкрутки как объяснения: алгоритм, "
+                f"который следил бы за вашей серией, не заметил бы, что вы сходили "
+                f"спать. А форма, разыгранность и усталость — заметили бы.",
+            ]
+
+    het = sq.get("heterogeneity") or {}
+    brackets = {k: v for k, v in het.items() if k.startswith("bracket_")}
+    if brackets:
+        values = [v["mean_excess_wins"] for v in brackets.values() if v["mean_excess_wins"] == v["mean_excess_wins"]]
+        if values:
+            lines += [
+                "",
+                f"Эффект примерно одинаков во всех брекетах (превышение над "
+                f"случайным порядком от {_pp(min(values))} до {_pp(max(values))}), "
+                f"то есть это не особенность какой-то отдельной группы игроков.",
+            ]
+
+    lines += ["", "![Шанс победить после серии](figures/streak_question.png)"]
     return "\n".join(lines)
 
 

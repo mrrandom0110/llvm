@@ -36,6 +36,7 @@ python -m scripts.detect_cohorts        # смурфы, слабые игрок�
 python -m scripts.run_simulation        # честный матчмейкинг как нулевая модель
 python -m scripts.run_negative_control  # проверка чувствительности самих тестов
 python -m scripts.run_tests_ab          # тесты A и B
+python -m scripts.analyse_streaks       # вопрос «выиграл N — шанс следующей?»
 python -m scripts.run_tests_cd          # тесты C и D
 python -m scripts.build_report          # сборка отчёта
 ```
@@ -55,7 +56,7 @@ python -m pytest tests/ -q
 | `dota_study/db.py` | схема хранилища исследования |
 | `dota_study/features.py` | серии, сессии, перформанс-признаки |
 | `dota_study/smurf.py` | детекторы смурфов и слабых игроков |
-| `dota_study/stats/` | статистические тесты |
+| `dota_study/stats/` | статистические тесты, включая перестановочный разбор серий |
 | `dota_study/sim/fair_mm.py` | симулятор честного матчмейкинга |
 | `dota_study/sim/calibrate.py` | калибровка нулевой модели по данным |
 | `dota_study/sim/rigged_mm.py` | симулятор с внедрённой подкруткой |

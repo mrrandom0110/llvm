@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from dota_study import features
-from dota_study.stats import dispersion, roster, streaks
+from dota_study.stats import dispersion, hotstreak, roster, streaks
 
 
 def test_streaks_are_computed_before_the_match() -> None:
@@ -26,6 +26,36 @@ def test_streaks_are_computed_before_the_match() -> None:
     )
     out = features.add_streaks(df)
     assert out["prev_streak"].tolist() == [0, 1, 2, -1, -2, 0, -1]
+
+
+def test_signed_prev_streak_is_the_history_before_each_match() -> None:
+    """Знаковая серия смотрит только назад и умеет работать пачками."""
+    outcomes = np.array([1, 1, 0, 0, 1])
+    assert hotstreak.signed_prev_streak(outcomes).tolist() == [0, 1, 2, -1, -2]
+
+    batch = np.array([[1, 1, 0], [0, 0, 1]])
+    assert hotstreak.signed_prev_streak(batch).tolist() == [[0, 1, 2], [0, -1, -2]]
+
+
+def test_permutation_null_excess_vanishes_for_a_fair_coin() -> None:
+    """При независимых бросках превышение над перемешиванием около нуля."""
+    rng = np.random.default_rng(11)
+    n_players, n_games = 80, 180
+    account = np.repeat(np.arange(n_players), n_games)
+    start_time = np.tile(np.arange(n_games), n_players)
+    df = pd.DataFrame(
+        {
+            "account_id": account,
+            "start_time": start_time,
+            "win": rng.integers(0, 2, n_players * n_games),
+        }
+    )
+    answer = hotstreak.permutation_null(
+        df, max_streak=4, n_permutations=80, min_games=50, seed=3
+    )
+    mid = answer.as_frame()
+    mid = mid[(mid["streak"] >= 1) & (mid["streak"] <= 4)]
+    assert abs(float(mid["excess"].mean())) < 0.015
 
 
 def test_dispersion_detects_pure_binomial() -> None:
