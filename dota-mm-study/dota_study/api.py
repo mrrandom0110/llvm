@@ -58,6 +58,8 @@ class OpenDotaClient:
         self.daily_budget = daily_budget
         self.api_key = api_key
         self.offline = offline
+        self.rpm_max = rpm
+        self._ok_streak = 0
         self._recent: deque[float] = deque()
         self._session = requests.Session()
         self._session.headers["User-Agent"] = "dota-mm-study/1.0 (research; open data)"
@@ -104,6 +106,19 @@ class OpenDotaClient:
     def _backoff(self, floor: int = 8) -> None:
         """Снижает собственный лимит после отказа сервера."""
         self.rpm = max(floor, int(self.rpm * 0.6))
+        self._ok_streak = 0
+
+    def _recover(self, after: int = 40) -> None:
+        """Возвращает темп к норме после устойчивой полосы успешных запросов.
+
+        Без восстановления однократный всплеск отказов навсегда замедлял бы
+        выгрузку: темп только падал бы, и многочасовой сбор растягивался бы на
+        сутки.
+        """
+        self._ok_streak += 1
+        if self._ok_streak >= after and self.rpm < self.rpm_max:
+            self.rpm = min(self.rpm_max, self.rpm + max(self.rpm // 4, 2))
+            self._ok_streak = 0
 
     # -- запросы ---------------------------------------------------------
 
@@ -173,6 +188,7 @@ class OpenDotaClient:
                 except ValueError as exc:
                     raise OpenDotaError(f"невалидный JSON от {key}") from exc
                 self.cache.put(key, 200, payload)
+                self._recover()
                 return payload
 
             if response.status_code == 429:
