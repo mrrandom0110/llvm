@@ -16,7 +16,7 @@ import time
 from typing import Any, Sequence
 
 from . import db
-from .api import OpenDotaClient, OpenDotaError, QuotaExhausted
+from .api import OpenDotaClient, OpenDotaError, QuotaExhausted, RateLimited
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +72,8 @@ def crawl_players(
     limit_players: int,
     history_limit: int = 5000,
     reserve: int = 0,
+    max_rate_limits: int = 6,
+    cooldown: int = 60,
 ) -> dict[str, int]:
     """Выгружает истории игроков со статусом `new`.
 
@@ -83,8 +85,16 @@ def crawl_players(
         (limit_players,),
     ).fetchall()
 
-    stats = {"fetched": 0, "private": 0, "empty": 0, "rows": 0, "ranked_rows": 0}
+    stats = {
+        "fetched": 0,
+        "private": 0,
+        "empty": 0,
+        "rows": 0,
+        "ranked_rows": 0,
+        "rate_limited": 0,
+    }
     started = time.time()
+    consecutive_rate_limits = 0
 
     for idx, record in enumerate(pending, 1):
         account_id = record["account_id"]
@@ -98,6 +108,24 @@ def crawl_players(
         except QuotaExhausted:
             log.warning("квота исчерпана на игроке %d", account_id)
             break
+        except RateLimited:
+            # Игрок остаётся в очереди со статусом new: данные доступны, просто
+            # мы слишком торопились. Прерываем сбор только если сервер отказывает
+            # подряд, то есть проблема не в отдельном запросе.
+            stats["rate_limited"] += 1
+            consecutive_rate_limits += 1
+            if consecutive_rate_limits >= max_rate_limits:
+                log.warning(
+                    "остановка: %d отказов по темпу подряд", consecutive_rate_limits
+                )
+                break
+            log.warning(
+                "отказ по темпу на игроке %d, пауза %d с и продолжаем",
+                account_id,
+                cooldown,
+            )
+            time.sleep(cooldown)
+            continue
         except OpenDotaError as exc:
             log.warning("игрок %s пропущен: %s", account_id, exc)
             conn.execute(
@@ -125,6 +153,7 @@ def crawl_players(
             conn.commit()
             continue
 
+        consecutive_rate_limits = 0
         db.insert_player_matches(conn, rows)
         times = [r["start_time"] for r in rows if r["start_time"]]
         ranked = sum(1 for r in rows if r["lobby_type"] == 7)
