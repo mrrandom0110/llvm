@@ -75,6 +75,9 @@ def main() -> None:
     add(_appendix(findings))
 
     text = "\n\n".join(s for s in sections if s)
+    # Сокращение «п.п.» уже заканчивается точкой, поэтому в конце предложения
+    # получается задвоение.
+    text = text.replace("п.п..", "п.п.")
     out = REPORTS_DIR / "report.md"
     out.write_text(text)
     log.info("отчёт записан: %s (%d символов)", out, len(text))
@@ -603,15 +606,20 @@ def _limitations() -> str:
 def _appendix(findings: pd.DataFrame) -> str:
     if findings.empty:
         return ""
-    lines = ["## Приложение: все зафиксированные величины", "", "| Тест | Метрика | Значение | 99% ДИ | n |", "| --- | --- | --- | --- | --- |"]
+    lines = [
+        "## Приложение: все зафиксированные величины",
+        "",
+        "| Тест | Метрика | Значение | 99% ДИ | n | Примечание |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
     for row in findings.itertuples(index=False):
-        ci = (
-            f"{_fmt(row.lo, 4)} … {_fmt(row.hi, 4)}"
-            if row.lo is not None and row.hi is not None
-            else "—"
+        has_ci = pd.notna(row.lo) and pd.notna(row.hi)
+        ci = f"{_fmt(row.lo, 4)} … {_fmt(row.hi, 4)}" if has_ci else "—"
+        n = f"{int(row.n):,}" if pd.notna(row.n) else "—"
+        note = row.note if isinstance(row.note, str) else ""
+        lines.append(
+            f"| {row.test} | {row.metric} | {_fmt(row.value, 5)} | {ci} | {n} | {note} |"
         )
-        n = f"{int(row.n):,}" if row.n is not None else "—"
-        lines.append(f"| {row.test} | {row.metric} | {_fmt(row.value, 5)} | {ci} | {n} |")
     return "\n".join(lines)
 
 
