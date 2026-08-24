@@ -72,6 +72,7 @@ def main() -> None:
     add(_test_c_section(cd))
     add(_test_d_section(cd, ab))
     add(_queue_section(_load("queues.json")))
+    add(_dependencies_section(_load("dependencies.json")))
     add(_cohorts_section(cohorts, findings))
     add(_verdict(ab, cd, null_model, _load("queues.json")))
     add(_limitations())
@@ -950,6 +951,127 @@ def _queue_section(qq: dict) -> str:
         "",
         "![Очереди поиска](figures/queues.png)",
     ]
+    return "\n".join(lines)
+
+
+def _dependencies_section(dep: dict) -> str:
+    """Что вообще связано с победой — не только серии."""
+    binaries = dep.get("binaries")
+    if not binaries:
+        return ""
+    labels = dep.get("labels") or {}
+    rows = []
+    for key, info in binaries.items():
+        rows.append({**info, "key": key, "title": labels.get(key, key)})
+    rows.sort(key=lambda r: -abs(r["within"]))
+
+    found = [r for r in rows if r["lo"] > 0 or r["hi"] < 0]
+    absent = [r for r in rows if r["lo"] <= 0 <= r["hi"]]
+
+    lines = [
+        "## Какие зависимости вообще есть",
+        "",
+        "Кроме серии можно спросить шире: *что ещё* в этих данных связано с "
+        "победой. У каждого признака две цифры. Сырая — как выглядит без "
+        "учёта того, кто играет. Внутриигровая — тот же человек в двух "
+        "состояниях. Если сырая большая, а внутриигровая ноль, это отбор, "
+        "а не механизм.",
+        "",
+        "| Признак | Сырой разрыв | У того же игрока | 99% ДИ | Матчей |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['title']} | {_pp(row['raw_diff'])} | {_pp(row['within'])} | "
+            f"{_pp(row['lo'])} … {_pp(row['hi'])} | {row['n']:,} |"
+        )
+
+    if found:
+        lines += ["", "Что **есть** (интервал не накрывает ноль), по убыванию силы:"]
+        for row in found:
+            lines.append(
+                f"* {row['title']}: {_pp(row['within'])} внутри игрока "
+                f"(сырой {_pp(row['raw_diff'])})."
+            )
+
+    party = binaries.get("in_party")
+    radiant = binaries.get("is_radiant")
+    comfort = binaries.get("comfort_hero")
+    same = binaries.get("same_hero")
+    above = binaries.get("lobby_above")
+    below = binaries.get("lobby_below")
+    wins = binaries.get("after_wins")
+    losses = binaries.get("after_losses")
+
+    lines += ["", "Как это читать."]
+    if radiant:
+        lines.append(
+            f"Сторона Radiant — самый большой эффект, {_pp(radiant['within'])}. "
+            "Это известное свойство карты, не матчмейкинг: оно одно и то же "
+            "в сырых и внутриигровых цифрах, потому что сторону вам почти "
+            "случайно назначают."
+        )
+    if comfort and same:
+        lines.append(
+            f"Привычный герой даёт {_pp(comfort['within'])}, повтор прошлого "
+            f"пика — {_pp(same['within'])}. Люди лучше играют на том, что "
+            "только что разыграли. Это снова форма, не состав очереди."
+        )
+    if wins and losses:
+        lines.append(
+            f"Серия подтверждается и в этом каталоге: после двух и больше "
+            f"побед {_pp(wins['within'])}, после двух и больше поражений "
+            f"{_pp(losses['within'])}."
+        )
+    if party:
+        lines.append(
+            f"Пати проигрывает соло {_pp(party['within'])} у того же человека. "
+            "Сырой разрыв почти ноль, потому что в пати чаще заходят более "
+            "сильные — отбор маскирует штраф, который Valve открыто вешает "
+            "на стеки."
+        )
+    if above and below:
+        lines.append(
+            f"Когда средний ранг лобби выше вашего обычного, шанс падает на "
+            f"{_pp(above['within'])}; когда ниже — растёт на {_pp(below['within'])}. "
+            "Это честный подбор по рейтингу, видимый с другой стороны: вас "
+            "поставили к более сильным или более слабым."
+        )
+
+    if absent:
+        lines += [
+            "",
+            "Чего **нет** — и это тоже результат. У того же игрока не меняют "
+            "шанс: "
+            + ", ".join(r["title"] for r in absent)
+            + ". Игровой вечер не «ломается» к шестому матчу, выходные не "
+            "отличаются от будней, необычный час суток не штрафует, длинный "
+            "перерыв почти ничего не даёт.",
+        ]
+
+    cont = dep.get("continue_session") or {}
+    if cont:
+        lines += [
+            "",
+            f"Отдельно — поведение, не исход. После победы человек остаётся "
+            f"в том же вечере в {cont['after_win']:.1%} случаев, после "
+            f"поражения — в {cont['after_loss']:.1%}. Разница "
+            f"{_pp(cont['diff'])}: люди не смахивают игру чаще после "
+            "поражения, чем после победы. Легенда «после лузстрика все тильтуют "
+            "и уходят, а в поиске остаются только обречённые» в этой выборке "
+            "не держится.",
+        ]
+
+    slope = dep.get("session_pos_slope")
+    if slope:
+        lines += [
+            "",
+            f"Линейный наклон по номеру матча в вечере {_pp(slope['within'])} "
+            f"за матч (99% ДИ {_pp(slope['lo'])} … {_pp(slope['hi'])}) — "
+            "усталости как монотонного штрафа нет.",
+        ]
+
+    lines += ["", "![Зависимости](figures/dependencies.png)"]
     return "\n".join(lines)
 
 

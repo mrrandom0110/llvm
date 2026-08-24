@@ -295,6 +295,28 @@ def test_queue_detector_finds_opposing_team_queues() -> None:
     assert answer.excess("same_sign_enemy") < -0.2
 
 
+def test_binary_scan_recovers_a_known_side_effect() -> None:
+    """Если Radiant выигрывает чаще у того же игрока, сканер это видит."""
+    from dota_study.stats import scan
+
+    rng = np.random.default_rng(2)
+    rows = []
+    for player in range(80):
+        for t in range(80):
+            radiant = int(rng.random() < 0.5)
+            p = 0.47 + 0.08 * radiant
+            rows.append(
+                {
+                    "account_id": player,
+                    "win": int(rng.random() < p),
+                    "is_radiant": radiant,
+                }
+            )
+    result = scan.binary_effect(pd.DataFrame(rows), "is_radiant", min_n=1000)
+    assert result is not None
+    assert result["within"] == pytest.approx(0.08, abs=0.03)
+
+
 def test_wilson_interval_covers_true_rate() -> None:
     from dota_study.controls import wilson_interval
 
