@@ -124,6 +124,35 @@ def main() -> None:
             note=f"{hero_rows[0][0]} {hero_rows[0][3]:.3f} .. {hero_rows[-1][0]} {hero_rows[-1][3]:.3f}",
         )
 
+    party = _party_control(conn)
+    if party and not party.get("insufficient"):
+        log.info(
+            "пати против соло (годы %s, покрытие поля %.0f%%): %.4f против %.4f, "
+            "разница %+.4f (99%% ДИ %+.4f, %+.4f)",
+            party["years"],
+            100 * party["coverage"],
+            party["party_winrate"],
+            party["solo_winrate"],
+            party["difference"],
+            party["lo"],
+            party["hi"],
+        )
+        db.record_finding(
+            conn,
+            "E_controls",
+            "party_advantage",
+            party["difference"],
+            party["lo"],
+            party["hi"],
+            party["n"],
+            f"пати {party['party_winrate']:.4f} против соло {party['solo_winrate']:.4f}; "
+            f"поле party_size заполнено у {100 * party['coverage']:.0f}% матчей",
+        )
+        payload_party = party
+    else:
+        payload_party = None
+        log.warning("контроль по пати не рассчитан: поле party_size заполнено слишком редко")
+
     _plot(res, hero_rows, brackets)
 
     payload = {
@@ -142,10 +171,66 @@ def main() -> None:
             bracket_label(b): res.by_bracket[b].n / res.total.n for b in brackets
         },
         "hero_winrates": {name: {"n": n, "winrate": wr} for name, n, _, wr in hero_rows},
+        "party": payload_party,
     }
     (DATA_DIR / "controls.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
     log.info("готово; вызовов API израсходовано: %d", client.stats["requests"])
     client.close()
+
+
+def _party_control(conn) -> dict[str, float] | None:
+    """Преимущество игры в пати над соло — ещё один заведомо существующий эффект.
+
+    Считается по уже выгруженным историям, без обращений к API. Сравнение
+    внутриигровое: у одних и тех же людей берутся их соло-матчи и их же матчи в
+    пати, поэтому различия между игроками не подменяют эффект.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from dota_study import features
+
+    full = features.analysis_sample(features.build_features(conn))
+    coverage = float(full["party_size"].notna().mean())
+
+    # Поле заполняется неравномерно во времени, и в годы с низким покрытием
+    # попадают не случайные матчи. Сравнивать можно только там, где данные есть
+    # у большинства матчей, иначе эффект пати смешается с эффектом периода.
+    year = pd.to_datetime(full["start_time"], unit="s").dt.year
+    by_year = full.groupby(year)["party_size"].apply(lambda s: s.notna().mean())
+    good_years = by_year[by_year >= 0.5].index
+    df = full[year.isin(good_years)].dropna(subset=["party_size"])
+    if len(df) < 10_000:
+        return {"coverage": coverage, "insufficient": True}
+    df = df.assign(in_party=(df["party_size"] > 1).astype(float))
+
+    # Оба режима должны встречаться у игрока, иначе сравнивать не с чем.
+    both = df.groupby("account_id")["in_party"].nunique()
+    df = df[df["account_id"].isin(both[both == 2].index)]
+    if len(df) < 10_000:
+        return {"coverage": coverage, "insufficient": True}
+
+    from dota_study.stats.streaks import fixed_effects_lpm
+
+    fe = fixed_effects_lpm(
+        df["win"].to_numpy(dtype=float),
+        np.column_stack([df["in_party"].to_numpy(dtype=float)]),
+        df["account_id"].to_numpy(),
+        ["in_party"],
+    )
+    lo, hi = fe.ci("in_party")
+    grouped = df.groupby("in_party")["win"].mean()
+    return {
+        "party_winrate": float(grouped.get(1.0, np.nan)),
+        "solo_winrate": float(grouped.get(0.0, np.nan)),
+        "difference": float(fe.coef[0]),
+        "lo": float(lo),
+        "hi": float(hi),
+        "n": int(len(df)),
+        "coverage": coverage,
+        "years": sorted(int(y) for y in good_years),
+        "insufficient": False,
+    }
 
 
 def _plot(res, hero_rows, brackets) -> None:
