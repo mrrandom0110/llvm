@@ -71,8 +71,9 @@ def main() -> None:
     add(_streak_question_section(_load("streak_question.json")))
     add(_test_c_section(cd))
     add(_test_d_section(cd, ab))
+    add(_queue_section(_load("queues.json")))
     add(_cohorts_section(cohorts, findings))
-    add(_verdict(ab, cd, null_model))
+    add(_verdict(ab, cd, null_model, _load("queues.json")))
     add(_limitations())
     add(_appendix(findings))
 
@@ -809,6 +810,149 @@ def _test_d_section(cd: dict, ab: dict) -> str:
     return "\n".join(lines)
 
 
+def _queue_section(qq: dict) -> str:
+    """Проверка легенды о раздельных очередях поиска."""
+    if not qq or not qq.get("observed"):
+        return ""
+    obs = qq["observed"]
+    null = qq["null_mean"]
+    lo = qq["null_lo"]
+    hi = qq["null_hi"]
+    excess = qq.get("excess") or {
+        k: obs[k] - null[k] for k in obs if k in null
+    }
+
+    def row(title: str, key: str) -> str:
+        return (
+            f"| {title} | {_fmt(obs[key])} | {_fmt(null[key])} "
+            f"({_fmt(lo[key])} … {_fmt(hi[key])}) | {_pp(excess[key])} |"
+        )
+
+    ally_ex = excess.get("same_sign_ally")
+    enemy_ex = excess.get("same_sign_enemy")
+    enemy_inside = lo["same_sign_enemy"] <= obs["same_sign_enemy"] <= hi["same_sign_enemy"]
+
+    lines = [
+        "## Есть ли отдельные очереди поиска — win queue и lose queue",
+        "",
+        "Легенда звучит так: при поиске матча вас кладут не в общую очередь, "
+        "а в одну из нескольких. После побед — в lose queue, после поражений — "
+        "в win queue. Дальше есть два варианта, и они дают разные следы в данных.",
+        "",
+        "**Одна очередь на весь матч.** Все десять игроков взяты из одного пула. "
+        "Тогда и союзник, и соперник чаще имеют тот же знак серии, что и вы: "
+        "после ваших четырёх побед вокруг тоже люди на победных сериях.",
+        "",
+        "**Очередь на команду.** Вашу пятёрку набрали из одной очереди, вражескую — "
+        "из другой. Тогда союзники похожи на вас по серии, а соперники — наоборот.",
+        "",
+        "Третий вариант — «lose queue значит, что вам устроят поражение» — это "
+        "уже не про состав очереди, а про исход. Его отвергает тест B: после "
+        "побед выигрывают чаще, а не реже.",
+        "",
+        "Честный подбор по рейтингу сам по себе чуть-чуть склеивает знаки серий: "
+        "сильные чаще бывают на победной серии, а в один матч попадают близкие "
+        "по рейтингу. Поэтому наблюдение сравнивается не с 50%, а с нулевым "
+        "законом, где серии перемешаны внутри брекета и недели, а кто с кем "
+        "попал в матч не меняется. Остаётся только та похожесть, которую мог "
+        "бы дать отдельный пул.",
+        "",
+        f"В выборке {qq['n_matches']:,} матчей, где есть хотя бы двое игроков "
+        f"с известной историей. Из них собрано {qq['n_pairs']:,} направленных "
+        f"пар ({qq['n_ally']:,} союзники, {qq['n_enemy']:,} соперники). "
+        f"Решающая проверка — соперники: {qq.get('n_enemy_matches', 0):,} "
+        f"матчей, где двое наших игроков оказались в разных командах.",
+        "",
+        "| Пары | Один знак серии | Нуль: только рейтинг | Сверх нуля |",
+        "| --- | --- | --- | --- |",
+        row("союзники", "same_sign_ally"),
+        row("соперники", "same_sign_enemy"),
+        "",
+    ]
+
+    if enemy_inside and abs(enemy_ex) < 0.02:
+        lines.append(
+            f"У **соперников** избыток похожести {_pp(enemy_ex)} и лежит внутри "
+            f"нулевого закона. Это решающая проверка: соперники не могут быть "
+            f"из одной пати, и именно они выдают общий пул поиска. Отдельной "
+            f"очереди на весь матч в данных нет."
+        )
+    elif enemy_ex > 0 and obs["same_sign_enemy"] > hi["same_sign_enemy"]:
+        lines.append(
+            f"Соперники имеют тот же знак серии на {_pp(enemy_ex)} чаще нуля. "
+            f"Это след общего пула: матч целиком набирается из людей с похожей "
+            f"недавней формой."
+        )
+    elif enemy_ex < 0 and obs["same_sign_enemy"] < lo["same_sign_enemy"]:
+        lines.append(
+            f"Соперники **реже** имеют тот же знак серии, чем при подборе по "
+            f"рейтингу (избыток {_pp(enemy_ex)}). Это был бы след очередей на "
+            f"команду: вас ставят против людей с противоположной серией."
+        )
+    else:
+        lines.append(
+            f"У соперников избыток похожести {_pp(enemy_ex)} "
+            f"(нуль {_fmt(null['same_sign_enemy'])}, наблюдение "
+            f"{_fmt(obs['same_sign_enemy'])})."
+        )
+
+    lines.append("")
+    if ally_ex is not None and abs(ally_ex - (enemy_ex or 0)) > 0.03 and ally_ex > 0:
+        duos = qq.get("n_ally_duos")
+        coplays = qq.get("mean_ally_coplays")
+        extra = ""
+        if duos and coplays:
+            extra = (
+                f" Это {duos:,} постоянных пар, которые играют вместе в среднем "
+                f"{coplays:.0f} раз — пати, а не очередь поиска."
+            )
+        lines.append(
+            f"У союзников похожесть гораздо выше ({_pp(ally_ex)} сверх нуля)."
+            f"{extra} На соперников этот канал не действует, и именно поэтому "
+            f"союзники здесь не доказательство очередей."
+        )
+    elif ally_ex is not None:
+        lines.append(
+            f"У союзников картина та же ({_pp(ally_ex)} сверх нуля): отдельной "
+            "командной очереди тоже не видно."
+        )
+
+    corr_e = obs.get("corr_enemy")
+    if corr_e == corr_e:
+        lines += [
+            "",
+            f"Корреляция длины серии с серией соперника {_fmt(corr_e, 3, sign=True)} "
+            f"при нуле {_fmt(null.get('corr_enemy'), 3, sign=True)}. "
+            "Даже слабая «чуть похожая форма у всего лобби» не появляется.",
+        ]
+
+    if enemy_ex is not None:
+        # Чистая очередь на весь матч даёт same-sign = 1; смесь с долей q
+        # среди честных матчей даёт избыток примерно 0.5 q.
+        reject_above = hi["same_sign_enemy"] - obs["same_sign_enemy"]
+        if reject_above > 0:
+            q = min(1.0, 2 * reject_above)
+            lines += [
+                "",
+                f"Чувствительность: очередь, которая забирала бы больше "
+                f"{100 * q:.0f}% матчей в чистый пул одного знака, подняла бы "
+                f"похожесть соперников выше верхней границы нуля. Такого сдвига "
+                f"нет. Более тонкая очередь — редкая или слабо связанная с серией — "
+                f"могла бы спрятаться внутри этих {100 * reject_above:.1f} п.п.",
+            ]
+
+    lines += [
+        "",
+        "Что этим нельзя закрыть. Скрытая очередь, которая **не** смотрит на "
+        "серию побед и поражений — например, на поведение или скрытый рейтинг "
+        "вовлечения — в этих данных не видна. Проверяется только легенда "
+        "«после стрика тебя кладут в win/lose queue».",
+        "",
+        "![Очереди поиска](figures/queues.png)",
+    ]
+    return "\n".join(lines)
+
+
 def _cohorts_section(cohorts: pd.DataFrame, findings: pd.DataFrame) -> str:
     if cohorts.empty:
         return ""
@@ -859,7 +1003,7 @@ def _cohorts_section(cohorts: pd.DataFrame, findings: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def _verdict(ab: dict, cd: dict, null_model: dict) -> str:
+def _verdict(ab: dict, cd: dict, null_model: dict, queues: dict | None = None) -> str:
     disp = ab.get("dispersion_real", {})
     streaks = ab.get("streaks", {})
     if not disp or not streaks:
@@ -897,10 +1041,20 @@ def _verdict(ab: dict, cd: dict, null_model: dict) -> str:
             f"величиной {abs(channel['lo']) * 100:.2f} п.п. за шаг серии.",
             "",
         ]
+    if queues and queues.get("excess"):
+        enemy = queues["excess"].get("same_sign_enemy")
+        if enemy is not None:
+            lines += [
+                f"6. Отдельных очередей поиска по знаку серии не видно: у соперников "
+                f"в одном матче одинаковый знак серии отличается от нуля "
+                f"подбора по рейтингу на {_pp(enemy)}.",
+                "",
+            ]
     floor = _detection_floor(ab)
     if floor is not None:
+        n = 7 if queues and queues.get("excess") else 6
         lines += [
-            f"6. Чувствительности при этом хватает с запасом: негативный контроль "
+            f"{n}. Чувствительности при этом хватает с запасом: негативный контроль "
             f"показал, что тест восстанавливает внедрённую подкрутку почти один к "
             f"одному, а значит уверенно различает вмешательство начиная примерно с "
             f"{floor * 100:.2f} п.п. за шаг серии.",

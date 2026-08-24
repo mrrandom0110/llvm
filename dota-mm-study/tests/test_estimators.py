@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from dota_study import features
-from dota_study.stats import dispersion, hotstreak, roster, streaks
+from dota_study.stats import dispersion, hotstreak, queues, roster, streaks
 
 
 def test_streaks_are_computed_before_the_match() -> None:
@@ -232,6 +232,67 @@ def test_roster_observations_split_teams_correctly() -> None:
     assert row["ally_skill"] == pytest.approx(55.0)   # 52,54,56,58
     assert row["enemy_skill"] == pytest.approx(64.0)  # 60..68
     assert row["delta"] == pytest.approx(-9.0)
+
+
+def _queue_matches(n_matches: int, assign, seed: int = 1) -> pd.DataFrame:
+    """Синтетические матчи: по два игрока выборки на сторону."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    t0 = 1_700_000_000
+    for mid in range(n_matches):
+        streaks = assign(rng)
+        for i, streak in enumerate(streaks):
+            rows.append(
+                {
+                    "match_id": mid,
+                    "account_id": mid * 10 + i,
+                    "player_slot": i if i < 2 else 128 + (i - 2),
+                    "prev_streak": streak,
+                    "average_rank": 40,
+                    "party_size": 1,
+                    "start_time": t0 + mid * 60,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_queue_detector_is_quiet_when_streaks_are_independent() -> None:
+    """При независимом знаке серии избыток похожести около нуля."""
+
+    def assign(rng):
+        return rng.choice([-2, -1, 1, 2], size=4)
+
+    rows = _queue_matches(400, assign)
+    answer = queues.permutation_null(rows, n_permutations=80, seed=3)
+    assert abs(answer.excess("same_sign_enemy")) < 0.03
+    assert abs(answer.excess("same_sign_ally")) < 0.03
+
+
+def test_queue_detector_finds_a_shared_search_pool() -> None:
+    """Если весь матч из одной очереди, соперники тоже имеют тот же знак."""
+
+    def assign(rng):
+        sign = rng.choice([-1, 1])
+        return [sign * int(rng.integers(1, 4)) for _ in range(4)]
+
+    rows = _queue_matches(300, assign)
+    answer = queues.permutation_null(rows, n_permutations=80, seed=4)
+    assert answer.observed["same_sign_enemy"] > 0.9
+    assert answer.excess("same_sign_enemy") > 0.3
+
+
+def test_queue_detector_finds_opposing_team_queues() -> None:
+    """Если команды из разных очередей, союзники совпадают, соперники — нет."""
+
+    def assign(rng):
+        return [2, 3, -2, -1]
+
+    rows = _queue_matches(200, assign)
+    answer = queues.permutation_null(rows, n_permutations=60, seed=5)
+    assert answer.observed["same_sign_ally"] == pytest.approx(1.0)
+    assert answer.observed["same_sign_enemy"] == pytest.approx(0.0)
+    assert answer.excess("same_sign_ally") > 0.2
+    assert answer.excess("same_sign_enemy") < -0.2
 
 
 def test_wilson_interval_covers_true_rate() -> None:

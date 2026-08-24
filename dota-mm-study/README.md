@@ -38,6 +38,7 @@ python -m scripts.run_negative_control  # проверка чувствител�
 python -m scripts.run_tests_ab          # тесты A и B
 python -m scripts.analyse_streaks       # вопрос «выиграл N — шанс следующей?»
 python -m scripts.run_tests_cd          # тесты C и D
+python -m scripts.analyse_queues        # win queue / lose queue
 python -m scripts.build_report          # сборка отчёта
 ```
 
