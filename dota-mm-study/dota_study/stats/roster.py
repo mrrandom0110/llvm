@@ -145,6 +145,48 @@ def test_asymmetry(obs: pd.DataFrame, max_streak: int = 3) -> dict[str, object]:
     }
 
 
+def delta_value_in_winrate(obs: pd.DataFrame) -> tuple[float, float]:
+    """Во сколько побед обходится единица перекоса состава.
+
+    Наклон перекоса измеряется в единицах ранга, а эффект серии — в вероятности
+    победы, и напрямую их не сравнить. Переводной коэффициент оценивается прямо
+    по данным: насколько меняется исход матча при изменении перекоса на единицу.
+    """
+    if obs.empty or "win" not in obs:
+        return float("nan"), float("nan")
+    usable = obs.dropna(subset=["delta", "win"])
+    counts = usable["account_id"].map(usable["account_id"].value_counts())
+    usable = usable[counts >= 2]
+    if len(usable) < 50:
+        return float("nan"), float("nan")
+    fe = fixed_effects_lpm(
+        usable["win"].to_numpy(dtype=float),
+        np.column_stack([usable["delta"].to_numpy(dtype=float)]),
+        usable["account_id"].to_numpy(),
+        ["delta"],
+    )
+    return float(fe.coef[0]), float(fe.se[0])
+
+
+def roster_channel_in_winrate(
+    delta_slope: float, delta_slope_se: float, value: float, value_se: float
+) -> dict[str, float]:
+    """Вклад канала состава в эффект серии, выраженный в вероятности победы.
+
+    Произведение двух оценок; неопределённость считается дельта-методом.
+    """
+    if not all(np.isfinite([delta_slope, delta_slope_se, value, value_se])):
+        return {}
+    effect = delta_slope * value
+    se = np.sqrt((value * delta_slope_se) ** 2 + (delta_slope * value_se) ** 2)
+    return {
+        "effect": float(effect),
+        "se": float(se),
+        "lo": float(effect - 2.576 * se),
+        "hi": float(effect + 2.576 * se),
+    }
+
+
 def decompose_streak(
     sample: pd.DataFrame, obs: pd.DataFrame, max_streak: int = 4
 ) -> dict[str, object]:

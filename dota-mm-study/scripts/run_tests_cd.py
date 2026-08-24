@@ -52,6 +52,14 @@ def main() -> None:
     )
     log.info("наблюдений с достаточным составом: %s", f"{len(obs):,}")
 
+    # Проверка на устойчивость: та же оценка, но силой служит только ранг из
+    # данных матча. Смешивание двух разных измерителей могло бы создать мнимую
+    # асимметрию, если доступность независимой оценки различается у союзников и
+    # соперников, поэтому основной вывод обязан выдерживать однородную меру.
+    obs_rank_only = roster_stats.build_roster_observations(
+        roster, focal, skill_column="rank_tier", external_skill=None
+    )
+
     results: dict[str, object] = {}
 
     # ---- Тест C ----------------------------------------------------------
@@ -90,6 +98,31 @@ def main() -> None:
                 lo,
                 hi,
             )
+            # Перевод в вероятность победы, чтобы границу можно было сравнить
+            # с эффектом серии из теста B.
+            value, value_se = roster_stats.delta_value_in_winrate(obs)
+            channel = roster_stats.roster_channel_in_winrate(
+                float(slope.coef[0]), float(slope.se[0]), value, value_se
+            )
+            if channel:
+                log.info(
+                    "  единица перекоса стоит %+.4f вероятности победы (SE %.4f)",
+                    value,
+                    value_se,
+                )
+                log.info(
+                    "  вклад канала состава в эффект серии: %+.5f, 99%% ДИ [%+.5f, %+.5f]",
+                    channel["effect"],
+                    channel["lo"],
+                    channel["hi"],
+                )
+                db.record_finding(
+                    conn, "C_roster", "channel_in_winrate", channel["effect"],
+                    channel["lo"], channel["hi"], asym["n"],
+                    "вклад подбора состава в эффект серии, в вероятности победы",
+                )
+                results["roster_channel_winrate"] = channel
+                results["delta_value"] = {"coef": value, "se": value_se}
             db.record_finding(
                 conn, "C_roster", "delta_slope", float(slope.coef[0]), lo, hi,
                 asym["n"], "перекос состава как функция серии; ноль — честный подбор",
@@ -100,6 +133,28 @@ def main() -> None:
             asym["mean_delta"] + 2.576 * asym["se_delta"],
             asym["n"],
         )
+
+        asym_rank = roster_stats.test_asymmetry(obs_rank_only, max_streak=args.max_streak)
+        if asym_rank.get("n", 0) > 0 and asym_rank.get("slope") is not None:
+            log.info(
+                "устойчивость (только ранг из матча): наклон %+.5f ± %.5f по %s наблюдениям",
+                asym_rank["slope"].coef[0],
+                asym_rank["slope"].se[0],
+                f"{asym_rank['n']:,}",
+            )
+            db.record_finding(
+                conn, "C_roster", "delta_slope_rank_only",
+                float(asym_rank["slope"].coef[0]),
+                *asym_rank["slope"].ci("streak"),
+                n=asym_rank["n"],
+                note="проверка на однородной мере силы",
+            )
+            results["test_c_rank_only"] = {
+                "n": asym_rank["n"],
+                "slope": float(asym_rank["slope"].coef[0]),
+                "slope_se": float(asym_rank["slope"].se[0]),
+                "mean_delta": asym_rank["mean_delta"],
+            }
         results["test_c"] = {
             "n": asym["n"],
             "n_players": asym["n_players"],
