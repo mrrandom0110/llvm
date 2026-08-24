@@ -61,6 +61,7 @@ def main() -> None:
     )
 
     results: dict[str, object] = {}
+    db.clear_findings(conn, "C_roster", "D_decomposition")
 
     # ---- Тест C ----------------------------------------------------------
     log.info("=" * 70)

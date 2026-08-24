@@ -42,6 +42,7 @@ def main() -> None:
         sample["label"] = "resident"
 
     results: dict[str, object] = {}
+    db.clear_findings(conn, "A_dispersion", "B_streaks")
 
     # ---- Тест A ----------------------------------------------------------
     log.info("=" * 70)

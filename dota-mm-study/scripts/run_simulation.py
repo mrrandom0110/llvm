@@ -47,6 +47,7 @@ def main() -> None:
         f"{sample['account_id'].nunique():,}",
     )
 
+    db.clear_findings(conn, "null_model")
     targets = cal.observed_targets(sample, min_games=args.min_games)
     log.info(
         "наблюдаемые ориентиры: медиана игр %.0f, разброс log(n) %.2f, подвижность ранга %.3f",

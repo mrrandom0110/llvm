@@ -214,6 +214,17 @@ def add_seeds(
     return conn.total_changes
 
 
+def clear_findings(conn: sqlite3.Connection, *tests: str) -> None:
+    """Удаляет прежние результаты теста перед новой записью.
+
+    Без этого в таблице накапливаются величины из старых прогонов с другими
+    настройками, и отчёт смешивал бы несопоставимые числа.
+    """
+    for test in tests:
+        conn.execute("DELETE FROM findings WHERE test = ?", (test,))
+    conn.commit()
+
+
 def record_finding(
     conn: sqlite3.Connection,
     test: str,

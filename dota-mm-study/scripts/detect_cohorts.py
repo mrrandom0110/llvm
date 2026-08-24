@@ -21,6 +21,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     conn = db.connect()
+    db.clear_findings(conn, "D_cohorts")
 
     log.info("построение признаков...")
     full = features.build_features(conn)

@@ -32,6 +32,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     conn = db.connect()
+    db.clear_findings(conn, "negative_control")
 
     sim_path = DATA_DIR / "simulation.json"
     if not sim_path.exists():

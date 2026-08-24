@@ -28,6 +28,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     client = OpenDotaClient()
     conn = db.connect()
+    db.clear_findings(conn, "E_controls")
 
     res = collect_controls(client, days=args.days, hero_windows=args.hero_windows)
     if res.total.n == 0:
