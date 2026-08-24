@@ -171,10 +171,57 @@ ROSTER_COLUMNS: Sequence[str] = (
 )
 
 
+# Отдельная выборка «4600–5000»: не смешивается с основной, чтобы не
+# сдвинуть цифры исследования подкрутки.
+BRACKET_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bracket_watch (
+    account_id   INTEGER PRIMARY KEY,
+    source       TEXT,
+    seed_rank    REAL,
+    rank_tier    INTEGER,
+    computed_mmr REAL,
+    in_band      INTEGER,
+    status       TEXT DEFAULT 'seen',
+    n_matches    INTEGER,
+    fetched_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_bracket_status ON bracket_watch (status, in_band);
+
+CREATE TABLE IF NOT EXISTS bracket_matches (
+    account_id    INTEGER NOT NULL,
+    match_id      INTEGER NOT NULL,
+    start_time    INTEGER,
+    duration      INTEGER,
+    player_slot   INTEGER,
+    radiant_win   INTEGER,
+    win           INTEGER,
+    lobby_type    INTEGER,
+    game_mode     INTEGER,
+    hero_id       INTEGER,
+    average_rank  REAL,
+    party_size    INTEGER,
+    leaver_status INTEGER,
+    kills         INTEGER,
+    deaths        INTEGER,
+    assists       INTEGER,
+    gold_per_min  INTEGER,
+    xp_per_min    INTEGER,
+    last_hits     INTEGER,
+    hero_damage   INTEGER,
+    net_worth     INTEGER,
+    level         INTEGER,
+    cluster       INTEGER,
+    PRIMARY KEY (account_id, match_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bm_account_time ON bracket_matches (account_id, start_time);
+"""
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     config.ensure_dirs()
     conn = sqlite3.connect(str(path or config.STUDY_DB), timeout=120)
     conn.executescript(SCHEMA)
+    conn.executescript(BRACKET_SCHEMA)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -193,6 +240,10 @@ def _insert_many(
 
 def insert_player_matches(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:
     return _insert_many(conn, "player_matches", PM_COLUMNS, rows)
+
+
+def insert_bracket_matches(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:
+    return _insert_many(conn, "bracket_matches", PM_COLUMNS, rows)
 
 
 def insert_roster(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:

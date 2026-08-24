@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from dota_study import features
-from dota_study.stats import dispersion, hotstreak, queues, roster, streaks
+from dota_study.stats import bracket, dispersion, hotstreak, queues, roster, streaks
 
 
 def test_streaks_are_computed_before_the_match() -> None:
@@ -315,6 +315,53 @@ def test_binary_scan_recovers_a_known_side_effect() -> None:
     result = scan.binary_effect(pd.DataFrame(rows), "is_radiant", min_n=1000)
     assert result is not None
     assert result["within"] == pytest.approx(0.08, abs=0.03)
+
+
+def test_mmr_band_prefers_computed_mmr() -> None:
+    assert bracket.in_mmr_band(4800, 50) is True
+    assert bracket.in_mmr_band(3000, 75) is False
+    assert bracket.in_mmr_band(None, 76) is True
+    assert bracket.in_mmr_band(None, 60) is False
+
+
+def test_extract_mmr_reads_all_opendota_shapes() -> None:
+    assert bracket.extract_mmr({"computed_mmr": 4720.4, "rank_tier": 75}) == (4720.4, 75)
+    assert bracket.extract_mmr({"mmr_estimate": {"estimate": 4810}, "rank_tier": 74}) == (
+        4810.0,
+        74,
+    )
+    assert bracket.extract_mmr({"solo_competitive_rank": 4900, "rank_tier": 75})[0] == 4900.0
+    assert bracket.extract_mmr(None) == (None, None)
+    assert bracket.extract_mmr({}) == (None, None)
+
+
+def test_bracket_skill_splits_obvious_gaps() -> None:
+    rows = []
+    t0 = 1_700_000_000
+    for acc, wr, gpm in ((1, 0.62, 620), (2, 0.38, 380)):
+        rng = np.random.default_rng(acc)
+        for i in range(40):
+            rows.append(
+                {
+                    "account_id": acc,
+                    "match_id": acc * 100 + i,
+                    "start_time": t0 + i * 3600,
+                    "duration": 2000,
+                    "player_slot": 0,
+                    "win": int(rng.random() < wr),
+                    "lobby_type": 7,
+                    "leaver_status": 0,
+                    "kills": 8 if wr > 0.5 else 3,
+                    "deaths": 4 if wr > 0.5 else 9,
+                    "assists": 10,
+                    "gold_per_min": gpm,
+                    "xp_per_min": gpm + 50,
+                }
+            )
+    skill = bracket.player_skill(pd.DataFrame(rows))
+    by_id = skill.set_index("account_id")["group"]
+    assert by_id.loc[1] == "сильный"
+    assert by_id.loc[2] == "слабый"
 
 
 def test_wilson_interval_covers_true_rate() -> None:

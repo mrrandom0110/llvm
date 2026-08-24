@@ -82,6 +82,51 @@ def sample_match_ids(
     return out
 
 
+_DIVINE_SQL = """
+select match_id, avg_rank_tier
+from public_matches
+where start_time >= {lo} and start_time < {hi}
+  and lobby_type = {lobby}
+  and duration > 900
+  and avg_rank_tier >= 70
+  and avg_rank_tier < 80
+order by random()
+limit {limit}
+"""
+
+
+def sample_divine_match_ids(
+    client: OpenDotaClient,
+    per_window: int = 40,
+    windows: int = 8,
+) -> list[tuple[int, float]]:
+    """Свежие ranked-матчи, где средний ранг лобби — Divine."""
+    now = int(time.time())
+    out: list[tuple[int, float]] = []
+    seen: set[int] = set()
+    for idx in range(windows):
+        hi = now - idx * 86400
+        lo = hi - 86400
+        sql = _DIVINE_SQL.format(
+            lo=lo, hi=hi, lobby=LOBBY_RANKED, limit=per_window
+        )
+        try:
+            rows = client.explorer(sql, max_age=6 * 3600)
+        except QuotaExhausted:
+            break
+        except OpenDotaError as exc:
+            log.warning("окно Divine %d пропущено: %s", idx, exc)
+            continue
+        for row in rows:
+            match_id = int(row["match_id"])
+            if match_id in seen:
+                continue
+            seen.add(match_id)
+            out.append((match_id, float(row["avg_rank_tier"])))
+        log.info("окно Divine %d: накоплено %d матчей", idx, len(out))
+    return out
+
+
 def _roster_rows(match: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     radiant_win = match.get("radiant_win")

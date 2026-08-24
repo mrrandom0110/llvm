@@ -40,6 +40,7 @@ python -m scripts.analyse_streaks       # вопрос «выиграл N — ш
 python -m scripts.run_tests_cd          # тесты C и D
 python -m scripts.analyse_queues        # win queue / lose queue
 python -m scripts.scan_dependencies     # какие зависимости вообще есть
+python -m scripts.watch_bracket         # слабые и сильные в полосе 4600–5000
 python -m scripts.build_report          # сборка отчёта
 ```
 

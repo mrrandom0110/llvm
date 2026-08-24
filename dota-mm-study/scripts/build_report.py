@@ -84,6 +84,7 @@ def main() -> None:
     add(_test_d_section(cd, ab))
     add(_queue_section(_load("queues.json")))
     add(_dependencies_section(_load("dependencies.json")))
+    add(_bracket_section(_load("bracket_activity.json")))
     add(_cohorts_section(cohorts, findings))
     add(_verdict(ab, cd, null_model, _load("queues.json")))
     add(_limitations())
@@ -1068,6 +1069,120 @@ def _dependencies_section(dep: dict) -> str:
         ]
 
     lines += ["", "![Зависимости](figures/dependencies.png)"]
+    return "\n".join(lines)
+
+
+def _bracket_section(data: dict) -> str:
+    """Слабые и сильные в одной полосе 4600–5000: когда и как часто играют."""
+    if not data or not data.get("n_enough"):
+        return ""
+    summary = data.get("summary") or {}
+    weak = summary.get("слабый") or {}
+    strong = summary.get("сильный") or {}
+    mid = summary.get("середина") or {}
+    diff = summary.get("разница_сильный_минус_слабый") or {}
+    days = int(data.get("recent_days") or 60)
+    mmr_lo = int(data.get("mmr_lo") or 4600)
+    mmr_hi = int(data.get("mmr_hi") or 5000)
+
+    def _n(value, digits: int = 1) -> str:
+        if value is None or (isinstance(value, float) and value != value):
+            return "нет данных"
+        return f"{float(value):.{digits}f}"
+
+    def _pct(value, digits: int = 0) -> str:
+        if value is None or (isinstance(value, float) and value != value):
+            return "нет данных"
+        return f"{100 * float(value):.{digits}f}%"
+
+    def _ячейка(info: dict, key: str, kind: str) -> str:
+        if kind == "n":
+            return str(int(info.get("n") or 0))
+        if kind == "pct":
+            return _pct(info.get(key))
+        if kind == "wr":
+            return _pct(info.get(key), 1)
+        digits = 0 if key == "gpm" else 1
+        return _n(info.get(key), digits)
+
+    lines = [
+        f"## Одна медаль — разная сила: кто играет в {mmr_lo}–{mmr_hi}",
+        "",
+        f"Один и тот же номер {mmr_lo}–{mmr_hi} (или Divine 4–5, если OpenDota "
+        f"не посчитала MMR) не значит, что люди играют одинаково. В этой полосе "
+        f"кто-то плюсует и доминирует на линии, кто-то минусует и умирает чаще. "
+        f"Мы взяли публичные ranked-истории за последние {days} дней, оставили "
+        f"тех, у кого накопилось хотя бы 25 каток, и разрезали на слабых "
+        f"(нижние 25%) и сильных (верхние 25%) по тому, как они реально "
+        f"играют: винрейт, золото в минуту, опыт, отношение убийств к смертям.",
+        "",
+        f"Дальше сравнивается не медаль, а режим жизни: сколько каток в неделю, "
+        f"длинные ли вечера, ночь это или прайм по Москве.",
+        "",
+        f"В наблюдение попали {data.get('n_watch', 0):,} аккаунтов из Divine-лобби. "
+        f"В полосе {mmr_lo}–{mmr_hi} осталось {data.get('n_in_band', 0):,}, "
+        f"достаточно свежих игр — у {data.get('n_enough', 0):,}. "
+        + (
+            f"Закрытых профилей на этом пути — {data.get('n_private', 0):,}: "
+            f"их историй нет, и они могут жить иначе, чем открытые."
+            if data.get("n_private")
+            else "Часть профилей закрыта: их историй нет."
+        ),
+        "",
+        "| Что смотрим | Слабые в этом пуле | Середина | Сильные в этом пуле |",
+        "| --- | --- | --- | --- |",
+    ]
+
+    rows = [
+        ("Игроков", "n", "n"),
+        ("Каток в неделю", "per_week", "num"),
+        ("Каток за один вечер", "session_len", "num"),
+        ("Ночные катки, 0–5 МСК", "night_msk", "pct"),
+        ("Прайм, 18–22 МСК", "prime_msk", "pct"),
+        ("Выходные", "weekend", "pct"),
+        ("Винрейт за 60 дней", "winrate", "wr"),
+        ("Золото в минуту", "gpm", "num"),
+    ]
+    for title, key, kind in rows:
+        lines.append(
+            f"| {title} | {_ячейка(weak, key, kind)} | {_ячейка(mid, key, kind)} | "
+            f"{_ячейка(strong, key, kind)} |"
+        )
+
+    if weak and strong:
+        week = diff.get("per_week")
+        night = diff.get("night_msk")
+        sess = diff.get("session_len")
+        bits = []
+        if week is not None and week == week:
+            word = "чаще" if week > 0 else "реже"
+            bits.append(
+                f"сильные запускают на {abs(week):.1f} каток в неделю {word}"
+            )
+        if sess is not None and sess == sess:
+            word = "длиннее" if sess > 0 else "короче"
+            bits.append(f"вечер у них на {abs(sess):.1f} каток {word}")
+        if night is not None and night == night:
+            word = "больше" if night > 0 else "меньше"
+            bits.append(
+                f"доля ночных каток (0–5 МСК) у сильных на {abs(100 * night):.0f}% {word}"
+            )
+        if bits:
+            lines += [
+                "",
+                "Простыми словами: " + "; ".join(bits) + ".",
+            ]
+        lines += [
+            "",
+            "Это не «подкрутка» и не закон вселенной. Это снимок публичных "
+            "аккаунтов одной полосы: кто в ней выглядит слабее, а кто сильнее, "
+            "и совпадает ли это с тем, *когда* они садятся в поиск. Если игроков "
+            f"мало (здесь слабых {weak.get('n', 0)}, сильных {strong.get('n', 0)}), "
+            "разница может быть шумом. Повторять стоит на большей выборке.",
+        ]
+
+    if (data.get("hours") or {}) and weak and strong:
+        lines += ["", "![Когда заходят слабые и сильные одной полосы](figures/bracket_activity.png)"]
     return "\n".join(lines)
 
 
