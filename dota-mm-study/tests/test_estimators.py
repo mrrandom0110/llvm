@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from dota_study import features
-from dota_study.stats import bracket, dispersion, hotstreak, queues, roster, streaks
+from dota_study.stats import bracket, dispersion, hotstreak, queues, roster, streaks, theories
 
 
 def test_streaks_are_computed_before_the_match() -> None:
@@ -363,6 +363,152 @@ def test_bracket_skill_splits_obvious_gaps() -> None:
     by_id = skill.set_index("account_id")["group"]
     assert by_id.loc[1] == "сильный"
     assert by_id.loc[2] == "слабый"
+
+
+def test_party_raises_next_lobby_rank() -> None:
+    """В пати лобби выше своего номера — оценщик это ловит."""
+    rows = []
+    for acc in (1, 2, 3, 4):
+        for i in range(40):
+            party = i % 2 == 0
+            rows.append(
+                {
+                    "account_id": acc,
+                    "match_id": acc * 100 + i,
+                    "start_time": 1_700_000_000 + i * 3600,
+                    "average_rank": 72.0 + (3.0 if party else 0.0),
+                    "rank_delta": 3.0 if party else 0.0,
+                    "rank_baseline": 72.0,
+                    "party_size": 2 if party else 1,
+                    "win": 1,
+                    "year": 2024,
+                }
+            )
+    df = pd.DataFrame(rows)
+    out = theories.party_lobby_effect(df)
+    assert out["within"] == pytest.approx(3.0, abs=0.2)
+    assert out["lo"] > 1.0
+
+
+def test_weakest_three_detects_stacked_side() -> None:
+    """Трое слабых на одной стороне дают счёт выше случайной рассадки."""
+    # Radiant: 50,51,52,80,81  Dire: 70,71,72,73,74 — трое слабых все на свете.
+    ranks = np.array([50, 51, 52, 80, 81, 70, 71, 72, 73, 74], dtype=float)
+    radiant = np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0])
+    observed = theories.weakest_three_together(ranks, radiant)
+    assert observed == 1.0
+    rng = np.random.default_rng(0)
+    nulls = [theories.weakest_three_together(ranks, rng.permutation(radiant)) for _ in range(80)]
+    assert observed >= np.quantile(nulls, 0.8)
+
+
+def test_smurf_pair_excess_finds_isolated_pool() -> None:
+    """Смурфы, которые играют только друг с другом, дают положительный избыток."""
+    rows = []
+    # Два матча: смурфы вместе, жители вместе.
+    for match_id, labels, ranks in (
+        (1, [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], [55] * 10),
+        (2, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [55] * 10),
+        (3, [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], [55] * 10),
+        (4, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [55] * 10),
+    ):
+        for i, (lab, rank) in enumerate(zip(labels, ranks)):
+            rows.append(
+                {
+                    "match_id": match_id,
+                    "account_id": match_id * 10 + i,
+                    "is_smurf": lab,
+                    "avg_rank_tier": rank,
+                    "start_time": 1_700_000_000,
+                    "player_slot": i if i < 5 else 128 + i - 5,
+                }
+            )
+    out = theories.smurf_pool_excess(pd.DataFrame(rows), n_perm=40, rng=np.random.default_rng(2))
+    assert out["excess"] > 0.1
+
+
+def test_next_lobby_follows_performance_after_loss() -> None:
+    """Красивый слив поднимает следующее лобби — оценщик видит сдвиг."""
+    rows = []
+    t0 = 1_700_000_000
+    for acc in range(8):
+        for i in range(30):
+            loss = i % 2 == 0
+            high = (i % 4 == 0)
+            rows.append(
+                {
+                    "account_id": acc,
+                    "match_id": acc * 100 + i,
+                    "start_time": t0 + i * 3600,
+                    "win": 0 if loss else 1,
+                    "perf_index": 1.5 if high else -1.5,
+                    "rank_delta": 0.0,
+                    "career_pos": i,
+                }
+            )
+    df = pd.DataFrame(rows)
+    pieces = []
+    for _, grp in df.groupby("account_id"):
+        g = grp.sort_values("start_time").copy()
+        # Следующее лобби жёстче именно после красивого поражения.
+        g["next_rank_delta"] = np.where((g["win"] == 0) & (g["perf_index"] > 0), 4.0, 0.0)
+        pieces.append(g)
+    out = theories.next_lobby_after_perf(pd.concat(pieces, ignore_index=True), after_win=False)
+    assert out["diff"] > 1.0
+
+
+def test_away_cluster_penalty_is_detected() -> None:
+    rows = []
+    for acc in (1, 2, 3):
+        for i in range(30):
+            away = i >= 20
+            rows.append(
+                {
+                    "account_id": acc,
+                    "cluster": 2 if away else 1,
+                    "win": 0 if away else 1,
+                    "rank_delta": 0.0,
+                    "start_time": 1_700_000_000 + i,
+                }
+            )
+    out = theories.away_cluster_effect(pd.DataFrame(rows))
+    assert out["win_within"] < -0.3
+
+
+def test_calibration_mobility_sees_later_rank_moves() -> None:
+    rows = []
+    t0 = 1_700_000_000
+    for acc in range(5):
+        for i in range(80):
+            rank = 50 + (20 if i >= 30 else 0)
+            rows.append(
+                {
+                    "account_id": acc,
+                    "start_time": t0 + i * 86400,
+                    "average_rank": rank,
+                }
+            )
+    out = theories.calibration_mobility(pd.DataFrame(rows), early=30)
+    assert out["share_changed_bracket"] == pytest.approx(1.0)
+    assert out["median_abs_move"] >= 3
+
+
+def test_patch_shift_detects_rank_jump() -> None:
+    patch = 1_681_948_800  # 2023-04-20
+    rows = []
+    for i in range(100):
+        t = patch - 10 * 86400 + i * 86400
+        rows.append(
+            {
+                "start_time": t,
+                "average_rank": 40.0 if t < patch else 55.0,
+                "match_id": i,
+                "win": 1,
+                "player_slot": 0,
+            }
+        )
+    out = theories.patch_shift(pd.DataFrame(rows), patch_ts=patch, window_days=20)
+    assert out["rank_after"] - out["rank_before"] > 10
 
 
 def test_wilson_interval_covers_true_rate() -> None:
