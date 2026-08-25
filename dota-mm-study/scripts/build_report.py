@@ -85,6 +85,7 @@ def main() -> None:
     add(_queue_section(_load("queues.json")))
     add(_dependencies_section(_load("dependencies.json")))
     add(_bracket_section(_load("bracket_activity.json")))
+    add(_theories_section(_load("theories.json")))
     add(_cohorts_section(cohorts, findings))
     add(_verdict(ab, cd, null_model, _load("queues.json")))
     add(_limitations())
@@ -1232,6 +1233,217 @@ def _bracket_section(data: dict) -> str:
 
     if (data.get("hours") or {}) and weak and strong:
         lines += ["", "![Когда заходят слабые и сильные одной полосы](figures/bracket_activity.png)"]
+    return "\n".join(lines)
+
+
+def _theories_section(data: dict) -> str:
+    """Остальные народные теории — тем же простым языком."""
+    if not data:
+        return ""
+
+    def _ci_covers_zero(info: dict, key="within", lo="lo", hi="hi") -> bool | None:
+        if not info or info.get(key) is None or info.get(key) != info.get(key):
+            return None
+        a, b = info.get(lo), info.get(hi)
+        if a is None or b is None or a != a or b != b:
+            return None
+        return a <= 0 <= b
+
+    def _ранг(value) -> str:
+        if value is None or (isinstance(value, float) and value != value):
+            return "нет данных"
+        return f"{float(value):+.2f}"
+
+    lines = [
+        "## Остальные теории матчмейкинга",
+        "",
+        "Жёсткая 50%, отдельные очереди по серии и наказание составом после "
+        "побед уже разобраны выше. Здесь — всё остальное, что люди рассказывают "
+        "про подбор. Предсказания зафиксированы в "
+        "[THEORIES.md](../THEORIES.md) до расчёта.",
+        "",
+        "| Что говорят | Что вышло | Простыми словами |",
+        "| --- | --- | --- |",
+    ]
+
+    party = data.get("party_lobby") or {}
+    if party.get("within") == party.get("within"):
+        sign = "выше" if party["within"] > 0 else "ниже"
+        win_c = party.get("win_controlled")
+        extra = ""
+        if win_c is not None and win_c == win_c:
+            extra = (
+                " Штраф к победе после учёта ранга лобби "
+                f"{_чаще(win_c)}."
+            )
+        lines.append(
+            f"| В пати лобби жёстче | лобби на {_ранг(party['within'])} ранга "
+            f"{sign} | "
+            + (
+                "Так и задумано: Valve открыто ставит пати более сильных. "
+                if party.get("lo", 0) > 0
+                else "Лобби почти как в соло. "
+            )
+            + extra
+            + " |"
+        )
+
+    nxt = (data.get("next_lobby") or {}).get("after_loss") or {}
+    if nxt.get("diff") == nxt.get("diff"):
+        covers = _ci_covers_zero(nxt, "diff")
+        lines.append(
+            f"| После красивого слива следующее лобби жёстче | "
+            f"разница {_ранг(nxt['diff'])} ранга | "
+            + (
+                "Интервал на нуле: следующее лобби не смотрит, как красиво вы проиграли. "
+                "После калибровки считают победу и поражение, не KDA."
+                if covers
+                else "Лобби после сильного поражения отличается от слабого. "
+                "Это ещё не доказательство скрытого MMR — смотрите, держится ли "
+                "эффект вне первых двадцати игр."
+            )
+            + " |"
+        )
+
+    away = data.get("away_cluster") or {}
+    if away.get("win_within") == away.get("win_within"):
+        covers = _ci_covers_zero(away, "win_within", "win_lo", "win_hi")
+        lines.append(
+            f"| На чужом сервере вас специально сливают | "
+            f"вы выигрываете {_чаще(away['win_within'])} | "
+            + (
+                "Шанс тот же. Серверы мешаются, но это не подкрутка исхода."
+                if covers
+                else "На чужом сервере шанс другой. Это может быть пинг или пул, "
+                "не скрытая очередь."
+            )
+            + " |"
+        )
+
+    role = data.get("off_role") or {}
+    if role.get("win_within") == role.get("win_within"):
+        lobby = role.get("lobby_within")
+        lobby_txt = f", лобби {_ранг(lobby)}" if lobby == lobby else ""
+        lines.append(
+            f"| На чужой роли катки невыездные | "
+            f"вы выигрываете {_чаще(role['win_within'])}{lobby_txt} | "
+            "Роль взята грубо по герою (саппорт против ядра), не по кнопке в поиске. "
+            + (
+                "Победа почти та же — легенда не держалась."
+                if _ci_covers_zero(role, "win_within", "win_lo", "win_hi")
+                else "Разница есть. Сначала смотрите лобби: если оно ниже, это "
+                "открытая поправка Valve, не «невыездные» катки."
+            )
+            + " |"
+        )
+
+    stack = data.get("skill_stack") or {}
+    if stack.get("n_matches"):
+        excess = stack.get("excess")
+        lines.append(
+            f"| Худших троих всегда в одну команду | "
+            f"избыток {excess:+.3f} на {stack['n_matches']} составах | "
+            + (
+                "Составов мало: это не ответ, а намёк. "
+                if stack["n_matches"] < 400
+                else ""
+            )
+            + (
+                "Не чаще случайной рассадки тех же людей."
+                if excess is not None and abs(excess) < 0.03
+                else "Слабые скучиваются чуть иначе, чем наугад."
+            )
+            + " |"
+        )
+
+    pool = data.get("smurf_pool") or {}
+    if pool.get("n_matches"):
+        lines.append(
+            f"| Смурфы сидят в своём пуле | "
+            f"избыток пар {pool.get('excess', float('nan')):+.3f} | "
+            "Если избыток есть — это как раз то, что Valve хочет: не пускать "
+            "смурфа к новичкам. Это не подкрутка вашего винрейта."
+            + " |"
+        )
+
+    spread = data.get("lobby_spread") or {}
+    night = spread.get("night") or {}
+    if night.get("diff") == night.get("diff"):
+        lines.append(
+            f"| Ночью лобби грязнее, потому что поиск дольше | "
+            f"разброс ранга {night['diff']:+.3f} | "
+            + (
+                "Ночью коридор шире. Это похоже на официальное «чем дольше ждут, "
+                "тем кривее можно собрать матч», не на злой умысел."
+                if night.get("lo", 0) > 0
+                else "Ночной разброс почти как дневной. Либо пул густой, либо "
+                "прокси слабый: времени в очереди в данных нет."
+            )
+            + " |"
+        )
+
+    cal = data.get("calibration") or {}
+    if cal.get("n_players"):
+        share = cal.get("share_changed_bracket") or 0
+        lines.append(
+            f"| Калибровка навсегда сажает номер | "
+            f"{100 * share:.0f}% сменили десяток рейтинга после 30-й игры, "
+            f"медианный сдвиг {cal.get('median_abs_move', float('nan')):.1f} | "
+            + (
+                "Номер после раннего окна ещё ездит. «Навсегда сел» не сходится."
+                if share > 0.20
+                else "После раннего окна мало кто сдвигает медаль. Это может "
+                "быть и калибровка, и то, что люди просто стабильны."
+            )
+            + " |"
+        )
+
+    patch = data.get("patch") or {}
+    if patch.get("rank_before") == patch.get("rank_before") and patch.get("n_after"):
+        shift = patch["rank_after"] - patch["rank_before"]
+        lines.append(
+            f"| Патч 7.33 раздул рейтинг | "
+            f"средний average_rank {shift:+.2f} | "
+            "Сдвиг сетки после большого патча — не подкрутка конкретного матча."
+            + " |"
+        )
+
+    snap = data.get("mmr_snapshot") or {}
+    if snap.get("corr") == snap.get("corr"):
+        lines.append(
+            f"| В рейтинге есть второй секретный MMR | "
+            f"связь видимого MMR и лобби {snap['corr']:.2f} "
+            f"(остаток {snap.get('resid_std', float('nan')):.2f}) | "
+            + (
+                "Лобби в целом объясняется видимым номером. Второго рейтинга "
+                "в этих снимках не видно."
+                if abs(snap["corr"]) >= 0.4
+                else "Связь слабая: либо снимок старый, либо лобби живёт своей жизнью. "
+                "Это всё ещё не доказательство второго MMR."
+            )
+            + " |"
+        )
+
+    gap = data.get("medal_gap") or {}
+    if gap.get("n"):
+        lines.append(
+            f"| Медаль и лобби — разные миры | "
+            f"у {100 * gap.get('share_abs_ge_3', 0):.0f}% игроков последние 20 "
+            f"лобби отличаются от длинного номера на 3+ ранга | "
+            "Так бывает и без второго MMR: патчи, паузы, смена роли."
+            + " |"
+        )
+
+    unchecked = data.get("unchecked") or []
+    if unchecked:
+        lines += [
+            "",
+            "Чего в открытых данных **нет**, и мы это не проверяли:",
+        ]
+        for item in unchecked:
+            lines.append(f"- {item}")
+
+    lines += ["", "![Остальные теории](figures/theories.png)"]
     return "\n".join(lines)
 
 

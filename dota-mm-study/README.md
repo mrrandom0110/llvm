@@ -11,6 +11,7 @@
 сравниваются с ним.
 
 Гипотезы, тесты и пороги зафиксированы в [PREREGISTRATION.md](PREREGISTRATION.md)
+и [THEORIES.md](THEORIES.md)
 до сбора данных. Итоги — в [reports/report.md](reports/report.md).
 
 ## Установка
@@ -41,6 +42,7 @@ python -m scripts.run_tests_cd          # тесты C и D
 python -m scripts.analyse_queues        # win queue / lose queue
 python -m scripts.scan_dependencies     # какие зависимости вообще есть
 python -m scripts.watch_bracket         # слабые и сильные в полосе 4600–5000
+python -m scripts.run_theories          # остальные теории матчмейкинга
 python -m scripts.build_report          # сборка отчёта
 ```
 

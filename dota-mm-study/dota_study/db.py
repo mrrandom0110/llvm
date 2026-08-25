@@ -217,11 +217,24 @@ CREATE INDEX IF NOT EXISTS idx_bm_account_time ON bracket_matches (account_id, s
 """
 
 
+# Снимок MMR уже выгруженных игроков: не смешивается с очередью players.
+SNAPSHOT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS mmr_snapshot (
+    account_id   INTEGER PRIMARY KEY,
+    computed_mmr REAL,
+    rank_tier    INTEGER,
+    lobby_rank   REAL,
+    fetched_at   INTEGER
+);
+"""
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     config.ensure_dirs()
     conn = sqlite3.connect(str(path or config.STUDY_DB), timeout=120)
     conn.executescript(SCHEMA)
     conn.executescript(BRACKET_SCHEMA)
+    conn.executescript(SNAPSHOT_SCHEMA)
     conn.row_factory = sqlite3.Row
     return conn
 
