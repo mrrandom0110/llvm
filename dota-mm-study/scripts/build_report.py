@@ -1262,6 +1262,9 @@ def _theories_section(data: dict) -> str:
         "про подбор. Предсказания зафиксированы в "
         "[THEORIES.md](../THEORIES.md) до расчёта.",
         "",
+        "Большинство этих легенд либо не держатся, либо это открытые правила "
+        "Valve, либо в OpenDota такого поля нет.",
+        "",
         "| Что говорят | Что вышло | Простыми словами |",
         "| --- | --- | --- |",
     ]
@@ -1291,18 +1294,24 @@ def _theories_section(data: dict) -> str:
     nxt = (data.get("next_lobby") or {}).get("after_loss") or {}
     if nxt.get("diff") == nxt.get("diff"):
         covers = _ci_covers_zero(nxt, "diff")
-        lines.append(
-            f"| После красивого слива следующее лобби жёстче | "
-            f"разница {_ранг(nxt['diff'])} ранга | "
-            + (
+        if covers:
+            plain = (
                 "Интервал на нуле: следующее лобби не смотрит, как красиво вы проиграли. "
                 "После калибровки считают победу и поражение, не KDA."
-                if covers
-                else "Лобби после сильного поражения отличается от слабого. "
-                "Это ещё не доказательство скрытого MMR — смотрите, держится ли "
-                "эффект вне первых двадцати игр."
             )
-            + " |"
+        elif nxt["diff"] < 0:
+            plain = (
+                "Следующее лобби ниже, не выше. Красивый проигрыш не делает катку "
+                "жёстче — легенда предсказывала обратное."
+            )
+        else:
+            plain = (
+                "Следующее лобби выше после сильной игры в поражении. Это ещё не "
+                "второй MMR: тот же знак бывает и от обычного роста формы."
+            )
+        lines.append(
+            f"| После красивого слива следующее лобби жёстче | "
+            f"разница {_ранг(nxt['diff'])} ранга | {plain} |"
         )
 
     away = data.get("away_cluster") or {}
@@ -1324,62 +1333,91 @@ def _theories_section(data: dict) -> str:
     if role.get("win_within") == role.get("win_within"):
         lobby = role.get("lobby_within")
         lobby_txt = f", лобби {_ранг(lobby)}" if lobby == lobby else ""
-        lines.append(
-            f"| На чужой роли катки невыездные | "
-            f"вы выигрываете {_чаще(role['win_within'])}{lobby_txt} | "
-            "Роль взята грубо по герою (саппорт против ядра), не по кнопке в поиске. "
-            + (
-                "Победа почти та же — легенда не держалась."
-                if _ci_covers_zero(role, "win_within", "win_lo", "win_hi")
-                else "Разница есть. Сначала смотрите лобби: если оно ниже, это "
+        if _ci_covers_zero(role, "win_within", "win_lo", "win_hi"):
+            plain = "Победа почти та же — легенда не держалась."
+        elif lobby == lobby and lobby > 0:
+            plain = (
+                "Чужую роль узнаём по герою (саппорт против ядра), не по кнопке поиска. "
+                "Выигрываете чуть реже, а лобби даже чуть выше — не «лёгкие катки "
+                "за не свою роль»."
+            )
+        else:
+            plain = (
+                "Роль взята грубо по герою. Разница есть. Если лобби ниже — это "
                 "открытая поправка Valve, не «невыездные» катки."
             )
-            + " |"
+        lines.append(
+            f"| На чужой роли катки невыездные | "
+            f"вы выигрываете {_чаще(role['win_within'])}{lobby_txt} | {plain} |"
         )
 
     stack = data.get("skill_stack") or {}
     if stack.get("n_matches"):
         excess = stack.get("excess")
+        hint = "Составов мало: это не ответ, а намёк. " if stack["n_matches"] < 400 else ""
+        if excess is None or excess != excess:
+            plain = "Не хватило составов."
+        elif excess <= 0:
+            plain = "Худшие трое вместе не чаще, чем наугад. Легенда не держалась."
+        else:
+            plain = "Слабые скучиваются чаще случайной рассадки тех же людей."
         lines.append(
             f"| Худших троих всегда в одну команду | "
             f"избыток {excess:+.3f} на {stack['n_matches']} составах | "
-            + (
-                "Составов мало: это не ответ, а намёк. "
-                if stack["n_matches"] < 400
-                else ""
-            )
-            + (
-                "Не чаще случайной рассадки тех же людей."
-                if excess is not None and abs(excess) < 0.03
-                else "Слабые скучиваются чуть иначе, чем наугад."
-            )
-            + " |"
+            f"{hint}{plain} |"
         )
 
     pool = data.get("smurf_pool") or {}
     if pool.get("n_matches"):
+        excess = pool.get("excess")
+        n_pairs = pool.get("n_pairs")
+        if excess is not None and abs(excess) < 0.01:
+            plain = (
+                "Отдельный пул здесь не виден. Помеченных смурфов мало, "
+                "ячейки почти не смешиваются."
+            )
+        else:
+            plain = (
+                "Если смурфы чаще рядом со смурфами — это то, что Valve хочет: "
+                "не пускать их к новичкам. Это не подкрутка вашего винрейта."
+            )
+        extra = f", меток {n_pairs}" if n_pairs else ""
         lines.append(
             f"| Смурфы сидят в своём пуле | "
-            f"избыток пар {pool.get('excess', float('nan')):+.3f} | "
-            "Если избыток есть — это как раз то, что Valve хочет: не пускать "
-            "смурфа к новичкам. Это не подкрутка вашего винрейта."
-            + " |"
+            f"избыток пар {pool.get('excess', float('nan')):+.3f}{extra} | {plain} |"
         )
 
     spread = data.get("lobby_spread") or {}
     night = spread.get("night") or {}
-    if night.get("diff") == night.get("diff"):
-        lines.append(
-            f"| Ночью лобби грязнее, потому что поиск дольше | "
-            f"разброс ранга {night['diff']:+.3f} | "
-            + (
+    if night.get("diff") == night.get("diff") and night.get("n_on", 0) >= 20:
+        if night.get("lo", 0) > 0:
+            night_plain = (
                 "Ночью коридор шире. Это похоже на официальное «чем дольше ждут, "
                 "тем кривее можно собрать матч», не на злой умысел."
-                if night.get("lo", 0) > 0
-                else "Ночной разброс почти как дневной. Либо пул густой, либо "
+            )
+        elif night.get("hi", 0) < 0:
+            night_plain = "Ночью коридор уже, не шире. «Ночной пул грязнее» не держалась."
+        else:
+            night_plain = (
+                "Ночной разброс почти как дневной. Либо пул густой, либо "
                 "прокси слабый: времени в очереди в данных нет."
             )
-            + " |"
+        lines.append(
+            f"| Ночью лобби грязнее, потому что поиск дольше | "
+            f"разброс ранга {night['diff']:+.3f} | {night_plain} |"
+        )
+
+    weekend = spread.get("weekend") or {}
+    if weekend.get("diff") == weekend.get("diff") and weekend.get("n_on", 0) >= 20:
+        if weekend.get("hi", 0) < 0:
+            week_plain = "В выходные коридор уже, не шире. «Выходной пул грязнее» не держалась."
+        elif weekend.get("lo", 0) > 0:
+            week_plain = "В выходные коридор шире. Это похоже на более редкий пул, не на подкрутку."
+        else:
+            week_plain = "Выходной разброс почти как будний."
+        lines.append(
+            f"| В выходные лобби грязнее | "
+            f"разброс ранга {weekend['diff']:+.3f} | {week_plain} |"
         )
 
     cal = data.get("calibration") or {}
@@ -1408,19 +1446,29 @@ def _theories_section(data: dict) -> str:
             + " |"
         )
 
+    returning = data.get("returning") or {}
+    if returning.get("diff") == returning.get("diff"):
+        if returning.get("lo", 0) > 0:
+            ret_plain = (
+                "После длинной паузы лобби сильнее прыгает. Так и должна работать "
+                "неопределённость рейтинга, это не подкрутка."
+            )
+        else:
+            ret_plain = "После паузы лобби прыгает примерно так же, как обычно."
+        lines.append(
+            f"| После перерыва вас кидает не туда | "
+            f"сдвиг лобби {returning['diff']:+.2f} | {ret_plain} |"
+        )
+
     snap = data.get("mmr_snapshot") or {}
     if snap.get("corr") == snap.get("corr"):
         lines.append(
             f"| В рейтинге есть второй секретный MMR | "
             f"связь видимого MMR и лобби {snap['corr']:.2f} "
-            f"(остаток {snap.get('resid_std', float('nan')):.2f}) | "
-            + (
-                "Лобби в целом объясняется видимым номером. Второго рейтинга "
-                "в этих снимках не видно."
-                if abs(snap["corr"]) >= 0.4
-                else "Связь слабая: либо снимок старый, либо лобби живёт своей жизнью. "
-                "Это всё ещё не доказательство второго MMR."
-            )
+            f"(остаток {snap.get('resid_std', float('nan')):.2f}, n={snap.get('n', 0)}) | "
+            "Связь есть, но шкалы разные (MMR — тысячи, лобби — десятки), "
+            "остаток большой. Второй секретный рейтинг здесь не доказали "
+            "и не опровергли."
             + " |"
         )
 

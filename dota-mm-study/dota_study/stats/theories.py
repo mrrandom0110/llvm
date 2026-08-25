@@ -242,15 +242,21 @@ def next_lobby_after_perf(
     }
 
 
-def lobby_spread_slices(matches: pd.DataFrame) -> dict:
-    """Разброс average_rank внутри матча ночью, в выходные и на высоком рейтинге."""
-    rows = matches.dropna(subset=["match_id", "average_rank", "start_time"])
+def lobby_spread_slices(matches: pd.DataFrame, rank_col: str = "average_rank") -> dict:
+    """Разброс ранга внутри матча ночью, в выходные и на высоком рейтинге.
+
+    В истории игрока `average_rank` — среднее лобби, поэтому ст. откл. по нему
+    ноль. Для настоящего разброса нужна колонка на человека (`rank_tier` состава).
+    """
+    if rank_col not in matches.columns:
+        return {}
+    rows = matches.dropna(subset=["match_id", rank_col, "start_time"])
     if rows.empty:
         return {}
     spread = rows.groupby("match_id").agg(
-        std=("average_rank", "std"),
-        mean=("average_rank", "mean"),
-        n=("average_rank", "size"),
+        std=(rank_col, "std"),
+        mean=(rank_col, "mean"),
+        n=(rank_col, "size"),
         start_time=("start_time", "min"),
     )
     spread = spread[spread["n"] >= 2].dropna(subset=["std"])
@@ -263,7 +269,8 @@ def lobby_spread_slices(matches: pd.DataFrame) -> dict:
     for name, col in (("night", "night"), ("weekend", "weekend"), ("immortal", "immortal")):
         a = spread.loc[spread[col] == 1, "std"]
         b = spread.loc[spread[col] == 0, "std"]
-        if a.empty or b.empty:
+        # Immortal в выборке составов почти нет — срез из трёх матчей не публикуем.
+        if a.empty or b.empty or len(a) < 20 or len(b) < 20:
             continue
         diff = float(a.mean() - b.mean())
         se = np.sqrt(a.var(ddof=1) / len(a) + b.var(ddof=1) / len(b))
@@ -469,20 +476,30 @@ def off_role_effect(df: pd.DataFrame, support_heroes: set[int]) -> dict:
 
 
 def mmr_explains_lobby(snapshot: pd.DataFrame) -> dict:
-    """Насколько computed_mmr предсказывает среднее лобби последних матчей."""
-    data = snapshot.dropna(subset=["computed_mmr", "lobby_rank"]).copy()
+    """Насколько снимок MMR/медали предсказывает среднее лобби последних матчей."""
+    data = snapshot.dropna(subset=["lobby_rank"]).copy()
     if len(data) < 8:
         return {"n": int(len(data))}
-    x = data["computed_mmr"].to_numpy(dtype=float)
-    y = data["lobby_rank"].to_numpy(dtype=float)
-    x = (x - x.mean()) / (x.std() or 1)
-    # простая регрессия
-    coef = np.polyfit(x, y, 1)
-    pred = np.polyval(coef, x)
-    resid = y - pred
-    return {
-        "n": int(len(data)),
-        "slope": float(coef[0]),
-        "resid_std": float(resid.std()),
-        "corr": float(np.corrcoef(data["computed_mmr"], y)[0, 1]),
-    }
+    out = {"n": int(len(data))}
+    if "computed_mmr" in data:
+        mmr_rows = data.dropna(subset=["computed_mmr"])
+        if len(mmr_rows) >= 8:
+            mmr = mmr_rows["computed_mmr"].to_numpy(dtype=float)
+            y_mmr = mmr_rows["lobby_rank"].to_numpy(dtype=float)
+            out["corr"] = float(np.corrcoef(mmr, y_mmr)[0, 1])
+            x = (mmr - mmr.mean()) / (mmr.std() or 1)
+            coef = np.polyfit(x, y_mmr, 1)
+            resid = y_mmr - np.polyval(coef, x)
+            out["slope"] = float(coef[0])
+            out["resid_std"] = float(resid.std())
+            out["n"] = int(len(mmr_rows))
+    if "rank_tier" in data:
+        medal_rows = data.dropna(subset=["rank_tier"])
+        if len(medal_rows) >= 8:
+            out["corr_medal"] = float(
+                np.corrcoef(
+                    medal_rows["rank_tier"].to_numpy(dtype=float),
+                    medal_rows["lobby_rank"].to_numpy(dtype=float),
+                )[0, 1]
+            )
+    return out

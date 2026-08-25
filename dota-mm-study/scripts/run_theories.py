@@ -49,7 +49,11 @@ def main() -> None:
     results["smurf_pool"] = _smurf_pool(conn)
     results["smurf_mirror"] = results["smurf_pool"].get("mirror") or {}
     results["next_lobby"] = _next_lobby(sample)
-    results["lobby_spread"] = theories.lobby_spread_slices(sample)
+    roster_for_spread = _load_roster(conn)
+    if not roster_for_spread.empty and roster_for_spread["rank_tier"].notna().any():
+        results["lobby_spread"] = theories.lobby_spread_slices(roster_for_spread, "rank_tier")
+    else:
+        results["lobby_spread"] = theories.lobby_spread_slices(sample)
     results["away_cluster"] = theories.away_cluster_effect(sample)
     results["calibration"] = theories.calibration_mobility(ranked)
     results["returning"] = theories.returning_swing(ranked)
@@ -286,6 +290,16 @@ def _record(conn, results: dict) -> None:
     snap = results.get("mmr_snapshot") or {}
     put("mmr_lobby_corr", snap.get("corr"), n=snap.get("n"), note="связь computed_mmr и лобби последних 20")
 
+    night = (results.get("lobby_spread") or {}).get("night") or {}
+    if night.get("n_on", 0) >= 20:
+        put("lobby_spread_night", night.get("diff"), night.get("lo"), night.get("hi"), night.get("n_on"), "разброс rank_tier ночью минус днём")
+    weekend = (results.get("lobby_spread") or {}).get("weekend") or {}
+    if weekend.get("n_on", 0) >= 20:
+        put("lobby_spread_weekend", weekend.get("diff"), weekend.get("lo"), weekend.get("hi"), weekend.get("n_on"), "разброс rank_tier в выходные минус будни")
+
+    returning = results.get("returning") or {}
+    put("returning_abs_delta", returning.get("diff"), returning.get("lo"), returning.get("hi"), returning.get("n_after"), "|сдвиг лобби| после паузы ≥30 дней")
+
 
 def _log_plain(results: dict) -> None:
     party = results.get("party_lobby") or {}
@@ -325,7 +339,11 @@ def _plot(results: dict) -> None:
     pool = results.get("smurf_pool") or {}
     add("смурф играет со смурфом (избыток)", pool, "excess")
     night = (results.get("lobby_spread") or {}).get("night") or {}
-    add("разброс лобби ночью", night, "diff")
+    if night.get("n_on", 0) >= 20:
+        add("разброс лобби ночью", night, "diff")
+    weekend = (results.get("lobby_spread") or {}).get("weekend") or {}
+    if weekend.get("n_on", 0) >= 20:
+        add("разброс лобби в выходные", weekend, "diff")
 
     if not items:
         return
@@ -336,7 +354,10 @@ def _plot(results: dict) -> None:
     ax.barh(y, vals, color=ACCENT, alpha=0.85)
     for i, row in enumerate(items):
         if row[2] is not None and row[3] is not None:
-            ax.errorbar(row[1], i, xerr=[[row[1] - row[2]], [row[3] - row[1]]], fmt="none", ecolor=NEUTRAL, capsize=3)
+            left = max(row[1] - row[2], 0.0)
+            right = max(row[3] - row[1], 0.0)
+            if left or right:
+                ax.errorbar(row[1], i, xerr=[[left], [right]], fmt="none", ecolor=NEUTRAL, capsize=3)
     ax.axvline(0.0, color=MUTED, lw=1)
     ax.set_yticks(y)
     ax.set_yticklabels(names)

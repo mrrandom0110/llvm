@@ -511,6 +511,64 @@ def test_patch_shift_detects_rank_jump() -> None:
     assert out["rank_after"] - out["rank_before"] > 10
 
 
+def test_lobby_spread_uses_per_player_rank() -> None:
+    """Разброс считается по рангу человека, не по среднему лобби."""
+    rows = []
+    day = 1_700_050_000  # дневное UTC
+    night = 1_700_010_000  # ночь UTC
+    for i, rank in enumerate([50, 51, 52, 50, 51, 52, 50, 51, 52, 50]):
+        rows.append(
+            {
+                "match_id": 1,
+                "rank_tier": rank,
+                "average_rank": 51.0,
+                "start_time": day,
+            }
+        )
+    for i, rank in enumerate([30, 40, 50, 60, 70, 35, 45, 55, 65, 75]):
+        rows.append(
+            {
+                "match_id": 2,
+                "rank_tier": rank,
+                "average_rank": 51.0,
+                "start_time": night,
+            }
+        )
+    # ещё дневных и ночных, чтобы срез не отсекся по n<20
+    for mid in range(3, 45):
+        tight = mid % 2 == 1
+        t = day if tight else night
+        ranks = [50 + (i % 3) for i in range(10)] if tight else [30 + 5 * i for i in range(10)]
+        for rank in ranks:
+            rows.append(
+                {
+                    "match_id": mid,
+                    "rank_tier": rank,
+                    "average_rank": 51.0,
+                    "start_time": t,
+                }
+            )
+    df = pd.DataFrame(rows)
+    by_person = theories.lobby_spread_slices(df, "rank_tier")
+    assert by_person["night"]["diff"] > 2
+    by_lobby_mean = theories.lobby_spread_slices(df, "average_rank")
+    assert abs(by_lobby_mean["night"]["diff"]) < 1e-9
+
+
+def test_mmr_snapshot_tracks_lobby() -> None:
+    """Видимый MMR и медаль должны предсказывать среднее лобби."""
+    df = pd.DataFrame(
+        {
+            "computed_mmr": [4000, 4200, 5000, 5500, 3000, 3100, 6000, 6100],
+            "lobby_rank": [70.0, 72.0, 80.0, 82.0, 55.0, 56.0, 88.0, 89.0],
+            "rank_tier": [70, 71, 80, 81, 55, 56, 88, 89],
+        }
+    )
+    out = theories.mmr_explains_lobby(df)
+    assert out["corr"] > 0.95
+    assert out["corr_medal"] > 0.95
+
+
 def test_wilson_interval_covers_true_rate() -> None:
     from dota_study.controls import wilson_interval
 
