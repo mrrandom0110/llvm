@@ -1,0 +1,45 @@
+{#
+  Every failure a reader can reach: a stale link, a symbol that is not in the
+  index, a name that matches two definitions, a disambiguation path that is
+  not repository-relative.
+
+  Only `path` is echoed, and only ever the *path* -- never the query string,
+  which is where an unsafe `?path=` argument lives.
+
+  The candidates block is what makes the 409 useful rather than merely
+  correct. An ambiguous symbol is a question, not an error: `helper` is
+  `static` in two files, and guessing one would send a reader to the wrong
+  definition silently. So the page asks, with the file each answer lives in.
+#}
+{% extends "base.html" %}
+
+{% block title %}{{ error_title }} - netstack academy{% endblock %}
+
+{% block main %}
+  <h1>{{ error_title }}</h1>
+  <p>{{ error_message }}</p>
+
+  {% if details.candidates %}
+    <nav aria-label="Matching definitions">
+      <h2>Choose a definition</h2>
+      <ul class="candidates">
+        {% for candidate in details.candidates %}
+          <li>
+            <a href="{{ candidate.url }}">
+              <code>{{ candidate.name }}</code> in {{ candidate.relative_path }}
+            </a>
+            <span class="muted">
+              line {{ candidate.line }}{% if candidate.is_static %}, static{% endif %}
+            </span>
+          </li>
+        {% endfor %}
+      </ul>
+    </nav>
+  {% endif %}
+
+  <p class="muted">Requested: <code>{{ path }}</code></p>
+  <p>
+    <a href="/">Back to the dashboard</a>, or
+    <a href="/search">search the course and the kernel</a>.
+  </p>
+{% endblock %}

@@ -34,6 +34,15 @@ And search degrades rather than fails: when the symbol index cannot be
 built, the lesson half of a result still answers, with a reason attached,
 because an unbuilt index is not a reason to break the working half.
 
+The pages have one rule of their own, and it shapes all of them: **reading
+never requires JavaScript.** Lesson bodies, labs, kernel context, quiz
+questions and the call graph's list form are rendered by the server, and
+:file:`static/js/academy.js` only adds saving and drawing on top. That is why
+the page routes below hand a view model from
+:mod:`netstack_academy.web.pages` to a template rather than an empty shell to
+a client-side renderer, and why only one page route ensures the index: a
+symbol card genuinely needs symbols, and nothing else does.
+
 Every handler is ``async`` even though the work inside is synchronous. That
 is deliberate: a ``def`` handler is run in a threadpool, which would mean two
 requests touching the one SQLite connection from two threads at once. Serving
@@ -44,6 +53,7 @@ there is nothing worth yielding for.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -70,6 +80,13 @@ from netstack_academy.learning.quiz import (
 from netstack_academy.learning.services import (
     DEFAULT_SEARCH_LIMIT as _LEARNING_DEFAULT_SEARCH_LIMIT,
 )
+
+# Aliased on import: the learning layer's own name shadows a builtin, which
+# is fine inside a module that never catches an import failure and is a trap
+# in one this size.
+from netstack_academy.learning.services import (
+    ModuleNotFoundError as CurriculumModuleNotFoundError,
+)
 from netstack_academy.learning.store import (
     InvalidStatusTransitionError,
     StateImportError,
@@ -77,14 +94,14 @@ from netstack_academy.learning.store import (
 )
 from netstack_academy.repo_inspector import inspect_repository
 
-from . import errors
+from . import errors, pages
 from .context import AcademyContext
 from .errors import install_error_handlers
 from .links import editor_deep_link
 from .payloads import (
     candidate_payload,
     dashboard_payload,
-    edge_payload,
+    graph_payload,
     index_run_response,
     index_status_payload,
     note_payload,
@@ -118,6 +135,17 @@ STATIC_ROOT = PACKAGE_ROOT / "static"
 
 #: Host names that mean "this machine" but are not IP literals.
 _LOOPBACK_NAMES = frozenset({"localhost"})
+
+#: Heading for a page-rendered failure. The wording is the reader's, not the
+#: protocol's: "409 Conflict" describes what HTTP thinks happened, and the
+#: only 409 this application can produce is a symbol name matching two
+#: definitions, which is a question rather than an error.
+_PAGE_ERROR_TITLES: Mapping[int, str] = {
+    400: "That request cannot be answered",
+    404: "Not found",
+    409: "More than one match",
+    422: "That address is not valid",
+}
 
 #: Sent on every response. None of it replaces the escaping the templates
 #: already do; it is the second line, for the case where something does get
@@ -230,13 +258,62 @@ def create_web_app(context: AcademyContext) -> FastAPI:
     app.state.context = context
 
     templates = Jinja2Templates(directory=str(TEMPLATE_ROOT))
+    # Autoescaping is Jinja's default for ``.html`` and is what makes every
+    # authored string on every page safe by default; the two values that are
+    # neither authored nor trusted -- notes and search queries -- get the
+    # stronger treatment in ``escaping.py`` before they arrive.
+    templates.env.trim_blocks = True
+    templates.env.lstrip_blocks = True
+    # Every repository-relative path on a page came out of a database file,
+    # so every one of them is filtered rather than printed.
+    templates.env.filters["repo_path"] = pages.displayable_path
 
-    def render_not_found(request: Request) -> Response:
+    def render_error(
+        request: Request,
+        status_code: int,
+        title: str,
+        message: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> Response:
+        # Only ``url.path`` is echoed, never the query string: the path is
+        # the route that was matched, while the query is where an unsafe
+        # ``?path=`` argument lives, and that is exactly what must not reach
+        # a page.
         return templates.TemplateResponse(
-            request, "not_found.html", {"path": request.url.path}, status_code=404
+            request,
+            "error.html",
+            {
+                "status_code": status_code,
+                "error_title": title,
+                "error_message": message,
+                "details": dict(details) if details else {},
+                "path": request.url.path,
+            },
+            status_code=status_code,
         )
 
-    install_error_handlers(app, render_not_found=render_not_found)
+    def render_not_found(request: Request) -> Response:
+        return render_error(
+            request,
+            404,
+            "Not found",
+            "There is nothing at this address.",
+        )
+
+    def render_page_error(request: Request, error: errors.ApiError) -> Response:
+        return render_error(
+            request,
+            error.status_code,
+            _PAGE_ERROR_TITLES.get(error.status_code, "Something went wrong"),
+            error.message,
+            error.details,
+        )
+
+    install_error_handlers(
+        app,
+        render_not_found=render_not_found,
+        render_page_error=render_page_error,
+    )
 
     @app.middleware("http")
     async def _apply_security_headers(request: Request, call_next: Any) -> Response:
@@ -253,8 +330,70 @@ def create_web_app(context: AcademyContext) -> FastAPI:
 
     @app.get("/", response_class=Response)
     async def dashboard(request: Request) -> Response:
+        # ``index_status_payload`` reads the persisted generation without
+        # ensuring anything, which is what lets the landing page report
+        # "your index is stale" without being the thing that spends minutes
+        # rebuilding it.
+        repository = inspect_repository(context.settings.kernel_repo)
         return templates.TemplateResponse(
-            request, "dashboard.html", {"dashboard": context.learning.dashboard()}
+            request,
+            "dashboard.html",
+            pages.dashboard_page(
+                context.learning.dashboard(),
+                index_status_payload(context.index, repository),
+                repository,
+            ),
+        )
+
+    @app.get("/modules/{slug}", response_class=Response)
+    async def module_page(request: Request, slug: str) -> Response:
+        try:
+            module = context.learning.module_view(slug)
+        except CurriculumModuleNotFoundError as exc:
+            raise errors.module_not_found(slug) from exc
+        return templates.TemplateResponse(
+            request, "module.html", pages.module_page(module)
+        )
+
+    @app.get("/lessons/{key}", response_class=Response)
+    async def lesson_page(request: Request, key: str) -> Response:
+        # Resolved through the curriculum first so that an unknown lesson is
+        # a 404 rather than an exception from the service, and so the page
+        # and the learning API agree on what "by id or by slug" means.
+        lesson = _require_lesson(key)
+        return templates.TemplateResponse(
+            request,
+            "lesson.html",
+            pages.lesson_page(
+                context.learning.lesson_view(lesson.id), _next_in_course(lesson)
+            ),
+        )
+
+    @app.get("/symbols/{name}", response_class=Response)
+    async def symbol_page(
+        request: Request, name: str, path: str | None = Query(default=None)
+    ) -> Response:
+        # This is the request that genuinely needs symbols, so this is where
+        # the index is built -- ``_resolve_symbol`` ensures it. Rendering a
+        # lesson does not; following one of its symbol links does.
+        symbol = _resolve_symbol(name, path)
+        return templates.TemplateResponse(
+            request, "symbol.html", pages.symbol_page(context, symbol)
+        )
+
+    @app.get("/search", response_class=Response)
+    async def search_page(
+        request: Request,
+        q: str = Query(default=""),
+        limit: Annotated[int, Query(ge=1, le=MAX_SEARCH_LIMIT)] = DEFAULT_SEARCH_LIMIT,
+    ) -> Response:
+        results = context.learning.search(q, limit=limit)
+        return templates.TemplateResponse(
+            request,
+            "search.html",
+            pages.search_page(
+                results, symbols_unavailable_reason=_symbols_unavailable_reason()
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -335,49 +474,14 @@ def create_web_app(context: AcademyContext) -> FastAPI:
         name: str, path: str | None = Query(default=None)
     ) -> dict[str, Any]:
         symbol = _resolve_symbol(name, path)
-        service = context.index.service
-        settings = context.settings
-
-        outgoing = [
-            edge_payload(
-                settings,
-                edge,
-                name=edge.target_name,
-                endpoint=_symbol_or_none(edge.target_symbol_id),
-            )
-            for edge in service.outgoing_edges(symbol.id)
-        ]
-
-        incoming = []
-        for edge in service.incoming_edges(symbol.id):
-            # The stored edge only knows the caller's id; resolving it is
-            # what makes an incoming call worth showing at all.
-            caller = _symbol_or_none(edge.source_symbol_id)
-            incoming.append(
-                edge_payload(
-                    settings,
-                    edge,
-                    name=caller.name if caller is not None else edge.target_name,
-                    endpoint=caller,
-                )
-            )
-
-        # A reference is a position in a file, not a second definition, so
-        # there is no endpoint symbol to resolve -- the site is the point.
-        references = [
-            edge_payload(settings, edge, name=edge.target_name, endpoint=None)
-            for edge in service.references(symbol.id)
-        ]
-
+        graph = graph_payload(context.settings, context.index.service, symbol.id)
         return {
             "symbol": symbol_payload(symbol),
-            "outgoing": outgoing,
-            "incoming": incoming,
-            "references": references,
+            **graph,
             "counts": {
-                "incoming": len(incoming),
-                "outgoing": len(outgoing),
-                "references": len(references),
+                "incoming": len(graph["incoming"]),
+                "outgoing": len(graph["outgoing"]),
+                "references": len(graph["references"]),
             },
         }
 
@@ -586,19 +690,32 @@ def create_web_app(context: AcademyContext) -> FastAPI:
             return None
         return last_result.reason or "The symbol index could not be built."
 
-    def _symbol_or_none(symbol_id: int | None) -> SymbolView | None:
-        """An edge endpoint, when the index can still name it.
+    def _next_in_course(lesson: Lesson) -> Lesson | None:
+        """The lesson after this one in the order the course was written in.
 
-        A heuristic edge often has no resolved endpoint at all, and an id
-        from a superseded generation no longer exists; both render as an
-        unresolved far end rather than as an error.
+        Not the same question as the dashboard's "next lesson", which
+        recommends the first thing the learner can usefully do. This one is
+        the page-turn: what follows, whether or not it is unlocked. Drafts
+        are skipped, because pointing a reader at unfinished material is
+        worse than ending the module.
         """
-        if symbol_id is None:
-            return None
-        try:
-            return context.index.service.symbol_by_id(symbol_id)
-        except SymbolNotFoundError:
-            return None
+        ordered = [
+            candidate
+            for module in context.curriculum.modules
+            for candidate in module.lessons
+        ]
+        for position, candidate in enumerate(ordered):
+            if candidate.id != lesson.id:
+                continue
+            return next(
+                (
+                    following
+                    for following in ordered[position + 1 :]
+                    if following.status == "published"
+                ),
+                None,
+            )
+        return None
 
     def _require_lesson(key: str) -> Lesson:
         """The lesson a URL names, by id or by slug.

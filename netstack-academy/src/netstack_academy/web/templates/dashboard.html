@@ -1,25 +1,37 @@
+{#
+  The four questions a learner has when they sit down: what is in this
+  course, how far am I, what should I do next, and is the machinery under me
+  working.
+
+  The last one earns its place on the landing page. Every symbol link on
+  every lesson page resolves through an index that may be missing, built at
+  another commit, or built without clangd, and a reader who is told that can
+  act on it -- whereas a reader who instead meets a deep link that opens the
+  wrong line has to work out why on their own. Saying so costs nothing here
+  because the status is read from the persisted index without building it:
+  rendering the page a learner lands on must never start a kernel-sized
+  reindex.
+#}
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
 {% block title %}Dashboard - netstack academy{% endblock %}
 
 {% block main %}
   <h1>The Linux network stack, one packet at a time</h1>
 
-  <section aria-labelledby="overall-progress-heading">
-    <h2 id="overall-progress-heading">Progress</h2>
-    <p
-      data-progress="overall"
-      role="progressbar"
-      aria-label="Overall course progress"
-      aria-valuenow="{{ dashboard.percent_complete }}"
-      aria-valuemin="0"
-      aria-valuemax="100"
-    >
-      {{ dashboard.completed_count }} of {{ dashboard.lesson_count }} lessons
-      complete ({{ dashboard.percent_complete }}%).
-    </p>
-    <p data-due-reviews="{{ dashboard.due_review_count }}">
-      {{ dashboard.due_review_count }} lesson(s) due for review.
+  <section class="card" aria-labelledby="progress-heading">
+    <h2 id="progress-heading">Your progress</h2>
+    {{ ui.progress_bar(
+        dashboard.percent_complete,
+        dashboard.completed_count,
+        dashboard.lesson_count,
+        'Overall course progress',
+        scope='overall',
+    ) }}
+    <p>
+      {{ dashboard.in_progress_count }} in progress,
+      {{ dashboard.not_started_count }} not started.
     </p>
     {% if dashboard.next_lesson %}
       <p data-next-lesson="{{ dashboard.next_lesson.slug }}">
@@ -27,41 +39,106 @@
         <a href="/lessons/{{ dashboard.next_lesson.slug }}">
           {{ dashboard.next_lesson.title }}
         </a>
+        <span class="muted">in {{ dashboard.next_lesson.module_slug }}</span>
       </p>
+    {% else %}
+      <p data-next-lesson="">Nothing left to start.</p>
+    {% endif %}
+  </section>
+
+  <section
+    class="card"
+    data-due-reviews="{{ dashboard.due_review_count }}"
+    aria-labelledby="reviews-heading"
+  >
+    <h2 id="reviews-heading">
+      Due for review: {{ dashboard.due_review_count }}
+    </h2>
+    {% if due_lessons %}
+      <ul>
+        {% for lesson in due_lessons %}
+          <li>
+            <a href="/lessons/{{ lesson.slug }}">{{ lesson.title }}</a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>Nothing is due. 0 cards are waiting.</p>
+    {% endif %}
+  </section>
+
+  <section
+    class="card"
+    data-index-status
+    data-repository-head="{{ repository.head or '' }}"
+    data-indexed-head="{{ index.indexed_head or '' }}"
+    data-index-stale="{{ 'true' if index.stale else 'false' }}"
+    data-index-ensured="{{ 'true' if index.ensured else 'false' }}"
+    aria-labelledby="index-heading"
+  >
+    <h2 id="index-heading">The kernel under this course</h2>
+    <dl>
+      <dt>Checked out at</dt>
+      <dd>
+        {% if repository.available %}
+          <code>{{ repository_short_head }}</code>
+        {% else %}
+          Unavailable{% if repository.reason %}: {{ repository.reason }}{% endif %}
+        {% endif %}
+      </dd>
+      <dt>Index built at</dt>
+      <dd>
+        {% if indexed_short_head %}
+          <code>{{ indexed_short_head }}</code>
+          ({{ index.symbol_count }} symbols, {{ index.edge_count }} edges)
+        {% else %}
+          Not built yet.
+        {% endif %}
+      </dd>
+      <dt>Agreement</dt>
+      <dd>
+        {% if index.stale %}
+          Stale: the index was built at another commit, so its line numbers
+          may not match the files on disk.
+        {% else %}
+          The index matches the checked-out tree.
+        {% endif %}
+      </dd>
+      <dt>Built this session</dt>
+      <dd>{{ 'Yes' if index.ensured else 'Not yet, it builds on first use.' }}</dd>
+    </dl>
+    {% if index.providers %}
+      <h3>Providers</h3>
+      <ul>
+        {% for provider in index.providers %}
+          <li data-provider="{{ provider.provider_name }}">
+            {{ provider.provider_name }}:
+            {{ 'available' if provider.available else 'unavailable' }}
+            {% if provider.reason %}<span class="muted">({{ provider.reason }})</span>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
     {% endif %}
   </section>
 
   <nav aria-label="Course modules">
     <h2>Modules</h2>
-    <ol>
+    <ol class="module-map">
       {% for module in dashboard.modules %}
-        <li data-module="{{ module.slug }}">
+        <li class="card" data-module="{{ module.slug }}">
           <h3>
             <a href="/modules/{{ module.slug }}">{{ module.title }}</a>
           </h3>
           <p>{{ module.summary }}</p>
-          <p
-            data-progress="module"
-            role="progressbar"
-            aria-label="{{ module.title }} progress"
-            aria-valuenow="{{ module.percent_complete }}"
-            aria-valuemin="0"
-            aria-valuemax="100"
-          >
-            {{ module.completed_count }} of {{ module.lesson_count }} complete
-          </p>
-          <ol>
+          {{ ui.progress_bar(
+              module.percent_complete,
+              module.completed_count,
+              module.lesson_count,
+              module.title ~ ' progress',
+          ) }}
+          <ol class="lesson-list">
             {% for lesson in module.lessons %}
-              <li
-                data-lesson="{{ lesson.slug }}"
-                data-progress-status="{{ lesson.progress_status }}"
-                {% if not lesson.is_unlocked %}data-locked="true"{% endif %}
-              >
-                <a href="/lessons/{{ lesson.slug }}">{{ lesson.title }}</a>
-                {% if lesson.status != "published" %}
-                  <span data-draft="true">draft</span>
-                {% endif %}
-              </li>
+              {{ ui.lesson_row(lesson) }}
             {% endfor %}
           </ol>
         </li>

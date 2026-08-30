@@ -31,6 +31,13 @@ caller supplied.
 **FastAPI's own 422 does not get through.** Its default body is
 ``{"detail": [...]}``, a second error shape for the case clients hit most,
 so :func:`install_error_handlers` replaces it with the envelope above.
+
+The same failures reach the reader through pages, where an error object is
+not a useful answer. The status codes and the codes above are unchanged
+there; only the body differs, and :func:`install_error_handlers` takes the
+renderers that produce it. Every :class:`ApiError` therefore carries enough
+to render either form, which is why an ambiguous symbol's candidates travel
+in ``details`` rather than being formatted into its message.
 """
 
 from __future__ import annotations
@@ -209,29 +216,50 @@ def wants_json(request: Request) -> bool:
 
 
 def install_error_handlers(
-    app: FastAPI, *, render_not_found: Callable[[Request], Response]
+    app: FastAPI,
+    *,
+    render_not_found: Callable[[Request], Response],
+    render_page_error: Callable[[Request, ApiError], Response] | None = None,
 ) -> None:
-    """Route every failure through the envelope, or through a 404 page.
+    """Route every failure through the envelope, or through a page.
 
-    ``render_not_found`` renders the human-facing 404: someone who follows a
-    stale link should get something they can read and navigate away from,
-    not an error object. It is injected because the templates belong to
+    Both renderers are injected because the templates belong to
     :mod:`netstack_academy.web.app`, not here.
+
+    ``render_not_found`` handles a URL that matched no route at all.
+    ``render_page_error`` handles a typed failure raised by a *page* handler
+    -- an ambiguous symbol, a lesson that does not exist, a disambiguation
+    path that is not repository-relative. Those need the same status codes as
+    the API and a different body: someone who followed a stale link should
+    get something they can read and navigate away from, and an ambiguous
+    symbol in particular needs its candidates rendered as links rather than
+    as JSON. Left unset, every :class:`ApiError` answers in the envelope,
+    which is the right default for a JSON-only application.
     """
 
     @app.exception_handler(ApiError)
     async def _handle_api_error(request: Request, exc: ApiError) -> Response:
+        if render_page_error is not None and not wants_json(request):
+            return render_page_error(request, exc)
         return error_response(exc.status_code, exc.code, exc.message, exc.details)
 
     @app.exception_handler(RequestValidationError)
     async def _handle_validation_error(
         request: Request, exc: RequestValidationError
     ) -> Response:
-        return error_response(
+        failure = ApiError(
             422,
             "validation_error",
             "The request did not match what this endpoint accepts.",
             _validation_fields(exc),
+        )
+        if render_page_error is not None and not wants_json(request):
+            # A page can fail validation too -- ``/search?limit=0`` is a link
+            # someone can construct -- and answering a browser with an error
+            # object would be a dead end.
+            return render_page_error(request, failure)
+        return error_response(
+            failure.status_code, failure.code, failure.message, failure.details
         )
 
     @app.exception_handler(StarletteHTTPException)

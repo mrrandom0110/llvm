@@ -28,7 +28,12 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from netstack_academy.indexing.orchestrator import IndexRunResult, ProviderDiagnostic
-from netstack_academy.indexing.service import EdgeView, SymbolView
+from netstack_academy.indexing.service import (
+    EdgeView,
+    IndexService,
+    SymbolNotFoundError,
+    SymbolView,
+)
 from netstack_academy.learning.quiz import QuestionResult
 from netstack_academy.learning.review import MAX_LEITNER_LEVEL
 from netstack_academy.learning.services import (
@@ -71,6 +76,19 @@ def symbol_url(name: str, relative_path: str | None = None) -> str:
     to a symbol.
     """
     url = f"/symbols/{quote(name, safe='')}"
+    if relative_path:
+        url = f"{url}?{urlencode({'path': relative_path})}"
+    return url
+
+
+def api_symbol_url(suffix: str, name: str, relative_path: str | None = None) -> str:
+    """A symbol's JSON sub-resource: ``/api/symbols/<name>/<suffix>``.
+
+    Built here rather than formatted into a template so the page's script
+    and the page's links encode a symbol name and its disambiguating path
+    exactly the same way.
+    """
+    url = f"/api/symbols/{quote(name, safe='')}/{suffix}"
     if relative_path:
         url = f"{url}?{urlencode({'path': relative_path})}"
     return url
@@ -142,6 +160,67 @@ def edge_payload(
         "site_deep_link": site_deep_link,
         "symbol": symbol_payload(endpoint) if endpoint is not None else None,
     }
+
+
+def _endpoint_or_none(service: IndexService, symbol_id: int | None) -> SymbolView | None:
+    """An edge endpoint, when the index can still name it.
+
+    A heuristic edge often has no resolved endpoint at all, and an id from a
+    superseded generation no longer exists; both render as an unresolved far
+    end rather than as an error.
+    """
+    if symbol_id is None:
+        return None
+    try:
+        return service.symbol_by_id(symbol_id)
+    except SymbolNotFoundError:
+        return None
+
+
+def graph_payload(
+    settings: Settings, service: IndexService, symbol_id: int
+) -> dict[str, list[dict[str, Any]]]:
+    """Everything the index knows about one symbol's neighbourhood.
+
+    Built once and shared by the graph endpoint and the symbol page, so the
+    picture a reader sees and the JSON a client fetches cannot describe
+    different graphs.
+
+    The three lists are kept apart because they answer different questions.
+    An outgoing edge names a callee; an incoming edge has to be resolved
+    from the caller's id, because an edge that cannot name its far end is an
+    arrow from nowhere; and a reference is a position in a file rather than a
+    second definition, so there is no endpoint to resolve -- the site is the
+    point.
+    """
+    outgoing = [
+        edge_payload(
+            settings,
+            edge,
+            name=edge.target_name,
+            endpoint=_endpoint_or_none(service, edge.target_symbol_id),
+        )
+        for edge in service.outgoing_edges(symbol_id)
+    ]
+
+    incoming = []
+    for edge in service.incoming_edges(symbol_id):
+        caller = _endpoint_or_none(service, edge.source_symbol_id)
+        incoming.append(
+            edge_payload(
+                settings,
+                edge,
+                name=caller.name if caller is not None else edge.target_name,
+                endpoint=caller,
+            )
+        )
+
+    references = [
+        edge_payload(settings, edge, name=edge.target_name, endpoint=None)
+        for edge in service.references(symbol_id)
+    ]
+
+    return {"outgoing": outgoing, "incoming": incoming, "references": references}
 
 
 def provider_payload(diagnostic: ProviderDiagnostic) -> dict[str, Any]:
