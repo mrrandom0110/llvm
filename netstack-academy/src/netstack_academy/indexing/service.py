@@ -81,7 +81,13 @@ class SymbolView:
 
 @dataclass(frozen=True, slots=True)
 class EdgeView:
-    """A stable, typed, read-only view of a persisted call/reference edge."""
+    """A stable, typed, read-only view of a persisted call/reference edge.
+
+    ``site_relative_path``/``site_line``/``site_column`` locate the call or
+    reference site itself (1-based, repository-relative), which is what a
+    caller needs to deep-link into the source; they are ``None`` for edges
+    recorded without a site, e.g. the fallback indexer's heuristic edges.
+    """
 
     id: int
     source_symbol_id: int
@@ -90,6 +96,9 @@ class EdgeView:
     edge_type: str
     provenance: str
     commit_hash: str
+    site_relative_path: str | None = None
+    site_line: int | None = None
+    site_column: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +147,9 @@ def _edge_to_view(edge: Edge) -> EdgeView:
         edge_type=edge.edge_type,
         provenance=edge.provenance,
         commit_hash=edge.commit_hash,
+        site_relative_path=edge.site_relative_path,
+        site_line=edge.site_line,
+        site_column=edge.site_column,
     )
 
 
@@ -208,7 +220,9 @@ class IndexService:
         Call-graph edges (``edge_type == "call"``) are exposed separately via
         :meth:`outgoing_edges`/:meth:`incoming_edges`; ``references`` is
         reserved for the semantic provider's ``textDocument/references``
-        -derived edges, which use ``edge_type="reference"``.
+        -derived edges, which use ``edge_type="reference"`` and carry the
+        location of the use itself in ``site_relative_path``/``site_line``/
+        ``site_column``.
         """
         combined = self._storage.references(symbol_id)
         return [_edge_to_view(edge) for edge in combined if edge.edge_type == "reference"]

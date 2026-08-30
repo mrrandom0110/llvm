@@ -42,6 +42,13 @@ class EdgeInput:
     passed to the same ``replace_symbols_and_edges`` call. ``target_index``
     is ``None`` when the target could not be resolved to a known symbol
     (the edge is retained with only ``target_name`` for diagnostics).
+
+    ``site_relative_path``/``site_line``/``site_column`` locate the *call
+    expression* (``edge_type="call"``) or the *use of the symbol*
+    (``edge_type="reference"``) -- never the definition of either endpoint.
+    They are set together or not at all: a collector that does not know the
+    site (the regex fallback indexer, or a semantic call with no
+    ``fromRanges``) leaves all three ``None``.
     """
 
     source_index: int
@@ -49,6 +56,9 @@ class EdgeInput:
     target_name: str
     edge_type: EdgeType
     provenance: EdgeProvenance
+    site_relative_path: str | None = None
+    site_line: int | None = None
+    site_column: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +79,11 @@ class Symbol:
 
 @dataclass(frozen=True, slots=True)
 class Edge:
-    """A call/reference edge as persisted in storage."""
+    """A call/reference edge as persisted in storage.
+
+    The ``site_*`` fields carry the call/reference site recorded by
+    :class:`EdgeInput`, and are ``None`` for edges inserted without one.
+    """
 
     id: int
     source_symbol_id: int
@@ -78,6 +92,9 @@ class Edge:
     edge_type: EdgeType
     provenance: EdgeProvenance
     commit_hash: str
+    site_relative_path: str | None = None
+    site_line: int | None = None
+    site_column: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,7 +12,10 @@ Schema overview
 - ``symbols`` — one row per definition; uniqueness/identity is
   ``(relative_path, line, commit_id)`` so that duplicate ``static``
   functions defined in different files never collide.
-- ``edges`` — call/reference edges between symbols in the same generation.
+- ``edges`` — call/reference edges between symbols in the same generation,
+  each optionally carrying the call/reference *site* (``site_relative_path``,
+  ``site_line``, ``site_column``) so a semantically derived edge can
+  deep-link to the position where the call/use actually happens.
 - ``symbols_fts`` — an FTS5 virtual table over symbol name/signature.
 
 ``replace_symbols_and_edges`` fully supersedes the previous generation
@@ -20,6 +23,18 @@ Schema overview
 generation is only deleted after the new generation has been completely
 written, so any failure rolls back and leaves the previous generation and
 ``current_head()`` untouched.
+
+Schema evolution
+----------------
+
+``_SCHEMA_STATEMENTS`` is the *current* schema and is written entirely with
+``IF NOT EXISTS``, so it is safe to replay against any existing database.
+Anything it cannot express -- adding a column to a table that already
+exists -- lives in :func:`_migrate_edge_site_columns`, which is guarded by
+the columns actually present rather than by the recorded version alone. A
+version-1 database (whose ``edges`` table predates the site columns) is
+therefore migrated in place, keeping its commit, symbols, edges and FTS
+rows, and ends up with exactly the same schema as a freshly created one.
 """
 
 from __future__ import annotations
@@ -31,7 +46,7 @@ from typing import Any
 
 from .models import Edge, EdgeInput, ReplaceIndexResult, Symbol, SymbolInput
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -70,7 +85,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         target_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
         target_name TEXT NOT NULL,
         edge_type TEXT NOT NULL CHECK (edge_type IN ('call', 'reference')),
-        provenance TEXT NOT NULL CHECK (provenance IN ('heuristic', 'semantic'))
+        provenance TEXT NOT NULL CHECK (provenance IN ('heuristic', 'semantic')),
+        site_relative_path TEXT,
+        site_line INTEGER,
+        site_column INTEGER
     )
     """,
     """
@@ -80,6 +98,21 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         symbol_id UNINDEXED
     )
     """,
+    # Every lookup below is by symbol name or by one of the edge endpoints,
+    # so those are the columns worth indexing; `(relative_path, line,
+    # commit_id)` is already covered by the UNIQUE constraint on `symbols`.
+    "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name)",
+    "CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_symbol_id)",
+    "CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_symbol_id)",
+)
+
+#: Columns added in schema version 2, applied to an ``edges`` table that
+#: already exists (a version-1 database) since ``CREATE TABLE IF NOT
+#: EXISTS`` cannot add them.
+_EDGE_SITE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("site_relative_path", "ALTER TABLE edges ADD COLUMN site_relative_path TEXT"),
+    ("site_line", "ALTER TABLE edges ADD COLUMN site_line INTEGER"),
+    ("site_column", "ALTER TABLE edges ADD COLUMN site_column INTEGER"),
 )
 
 _SYMBOL_COLUMNS = (
@@ -103,6 +136,9 @@ _EDGE_COLUMNS = (
     "edges.edge_type",
     "edges.provenance",
     "commits.hash",
+    "edges.site_relative_path",
+    "edges.site_line",
+    "edges.site_column",
 )
 
 
@@ -142,6 +178,9 @@ def _row_to_edge(row: tuple[Any, ...]) -> Edge:
         edge_type,
         provenance,
         commit_hash,
+        site_relative_path,
+        site_line,
+        site_column,
     ) = row
     return Edge(
         id=edge_id,
@@ -151,7 +190,27 @@ def _row_to_edge(row: tuple[Any, ...]) -> Edge:
         edge_type=edge_type,
         provenance=provenance,
         commit_hash=commit_hash,
+        site_relative_path=site_relative_path,
+        site_line=site_line,
+        site_column=site_column,
     )
+
+
+def _migrate_edge_site_columns(connection: sqlite3.Connection) -> None:
+    """Add any missing ``edges.site_*`` column, preserving existing rows.
+
+    Guarded by the columns actually present rather than by the recorded
+    schema version, so it is a no-op for a database just created from
+    ``_SCHEMA_STATEMENTS`` (which already declares them) and completes a
+    half-applied migration instead of failing on a duplicate column.
+    """
+    present = {
+        row[0]
+        for row in connection.execute("SELECT name FROM pragma_table_info('edges')")
+    }
+    for column, statement in _EDGE_SITE_COLUMNS:
+        if column not in present:
+            connection.execute(statement)
 
 
 class IndexStorage:
@@ -204,6 +263,7 @@ class IndexStorage:
             if current_version < SCHEMA_VERSION:
                 for statement in _SCHEMA_STATEMENTS:
                     connection.execute(statement)
+                _migrate_edge_site_columns(connection)
                 connection.execute(
                     """
                     INSERT INTO schema_meta (id, version) VALUES (1, ?)
@@ -303,8 +363,9 @@ class IndexStorage:
                     """
                     INSERT INTO edges (
                         commit_id, source_symbol_id, target_symbol_id,
-                        target_name, edge_type, provenance
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        target_name, edge_type, provenance,
+                        site_relative_path, site_line, site_column
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         commit_id,
@@ -313,6 +374,9 @@ class IndexStorage:
                         edge.target_name,
                         edge.edge_type,
                         edge.provenance,
+                        edge.site_relative_path,
+                        edge.site_line,
+                        edge.site_column,
                     ),
                 )
 
