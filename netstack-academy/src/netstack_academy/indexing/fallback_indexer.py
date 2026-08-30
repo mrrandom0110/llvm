@@ -49,9 +49,20 @@ _CONTROL_KEYWORDS = frozenset(
 # no `;`/`{`/`}` inside it, and either nothing else on the line or an
 # opening brace, up to end of line. A trailing `;` (a prototype) never
 # matches, since it isn't accounted for after the closing paren.
+#
+# The return-type group's repetitions each require a *mandatory* trailing
+# separator (whitespace, or a pointer `*` with optional surrounding
+# whitespace). This is the boundary that distinguishes the return type from
+# the function name: the name token sits directly against `(` with no
+# separator, so it can never be consumed by this group, no matter how the
+# engine backtracks. (An earlier version made the trailing separator
+# optional, which let the group's own backtracking swallow all but the last
+# character of the name -- e.g. `helper` collapsed to `r` -- since regex
+# backtracking gives back the *minimum* needed for the rest of the pattern
+# to match, and the name group only requires one character.)
 _DEFINITION_RE = re.compile(
     r"^(?P<static>static\s+)?"
-    r"(?:[A-Za-z_]\w*\s*\*?\s*)+"
+    r"(?:[A-Za-z_]\w*\s*\*\s*|[A-Za-z_]\w*\s+)+"
     r"(?P<name>[A-Za-z_]\w*)\s*"
     r"\(\s*(?P<params>[^;{}()]*)\s*\)\s*"
     r"(?P<brace>\{)?\s*$"

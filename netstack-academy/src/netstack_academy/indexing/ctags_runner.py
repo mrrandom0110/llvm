@@ -94,7 +94,7 @@ def check_ctags_binary(
             available=False,
             is_universal=False,
             version=None,
-            reason="ctags --version timed out",
+            reason="ctags --version timeout",
         )
     except OSError as exc:
         return CtagsAvailability(
@@ -200,7 +200,7 @@ def run_ctags(
         return CtagsRunResult(
             status="timeout",
             definitions=[],
-            diagnostics=["ctags indexing subprocess timed out"],
+            diagnostics=["ctags indexing subprocess timeout"],
         )
     except OSError as exc:
         return CtagsRunResult(
