@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}netstack academy{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/academy.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <nav aria-label="Site">
+        <a href="/">Dashboard</a>
+        <a href="/search">Search</a>
+      </nav>
+    </header>
+    <main id="main">
+      {% block main %}{% endblock %}
+    </main>
+    <script src="/static/js/academy.js" defer></script>
+  </body>
+</html>

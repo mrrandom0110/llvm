@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - netstack academy{% endblock %}
+
+{% block main %}
+  <h1>The Linux network stack, one packet at a time</h1>
+
+  <section aria-labelledby="overall-progress-heading">
+    <h2 id="overall-progress-heading">Progress</h2>
+    <p
+      data-progress="overall"
+      role="progressbar"
+      aria-label="Overall course progress"
+      aria-valuenow="{{ dashboard.percent_complete }}"
+      aria-valuemin="0"
+      aria-valuemax="100"
+    >
+      {{ dashboard.completed_count }} of {{ dashboard.lesson_count }} lessons
+      complete ({{ dashboard.percent_complete }}%).
+    </p>
+    <p data-due-reviews="{{ dashboard.due_review_count }}">
+      {{ dashboard.due_review_count }} lesson(s) due for review.
+    </p>
+    {% if dashboard.next_lesson %}
+      <p data-next-lesson="{{ dashboard.next_lesson.slug }}">
+        Next up:
+        <a href="/lessons/{{ dashboard.next_lesson.slug }}">
+          {{ dashboard.next_lesson.title }}
+        </a>
+      </p>
+    {% endif %}
+  </section>
+
+  <nav aria-label="Course modules">
+    <h2>Modules</h2>
+    <ol>
+      {% for module in dashboard.modules %}
+        <li data-module="{{ module.slug }}">
+          <h3>
+            <a href="/modules/{{ module.slug }}">{{ module.title }}</a>
+          </h3>
+          <p>{{ module.summary }}</p>
+          <p
+            data-progress="module"
+            role="progressbar"
+            aria-label="{{ module.title }} progress"
+            aria-valuenow="{{ module.percent_complete }}"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            {{ module.completed_count }} of {{ module.lesson_count }} complete
+          </p>
+          <ol>
+            {% for lesson in module.lessons %}
+              <li
+                data-lesson="{{ lesson.slug }}"
+                data-progress-status="{{ lesson.progress_status }}"
+                {% if not lesson.is_unlocked %}data-locked="true"{% endif %}
+              >
+                <a href="/lessons/{{ lesson.slug }}">{{ lesson.title }}</a>
+                {% if lesson.status != "published" %}
+                  <span data-draft="true">draft</span>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ol>
+        </li>
+      {% endfor %}
+    </ol>
+  </nav>
+{% endblock %}

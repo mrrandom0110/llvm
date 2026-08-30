@@ -1,0 +1,130 @@
+/*
+ * Everything is served from this file: no CDN, no webfont host, no analytics.
+ * A kernel reading session on a laptop with no network renders exactly the
+ * same page as one with it.
+ */
+
+:root {
+  --ink: #16181d;
+  --paper: #fbfbfd;
+  --muted: #5c6270;
+  --rule: #d7dae2;
+  --accent: #1d4ed8;
+  --locked: #8a8f9c;
+  --measure: 46rem;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 1rem 4rem;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.6;
+}
+
+main {
+  max-width: var(--measure);
+  margin: 0 auto;
+}
+
+/* Visible only once focused, which is the whole point of a skip link. */
+.skip-link {
+  position: absolute;
+  left: -100vw;
+}
+
+.skip-link:focus {
+  position: static;
+  display: inline-block;
+  padding: 0.5rem;
+}
+
+.site-header {
+  max-width: var(--measure);
+  margin: 0 auto;
+  border-bottom: 1px solid var(--rule);
+}
+
+.site-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.75rem 0;
+}
+
+a {
+  color: var(--accent);
+}
+
+code,
+pre {
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+}
+
+pre {
+  overflow-x: auto;
+  padding: 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: #fff;
+}
+
+[data-locked="true"] {
+  color: var(--locked);
+}
+
+[data-provenance="heuristic"] {
+  border-left: 3px solid var(--locked);
+  padding-left: 0.5rem;
+}
+
+[data-provenance="semantic"] {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.5rem;
+}
+
+[data-api-error] {
+  border: 1px solid #b42318;
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+}
+
+[data-api-error]:empty {
+  display: none;
+}
+
+/* Keyboard focus must be obvious; the default outline is easy to lose
+   against a light background. */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 40rem) {
+  body {
+    padding: 0 0.75rem 3rem;
+  }
+
+  ol,
+  ul {
+    padding-left: 1.25rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

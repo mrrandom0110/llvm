@@ -230,6 +230,20 @@ class IndexService:
 
         raise SymbolNotFoundError(resolution.reason or f"No symbol named {name!r} found")
 
+    def symbol_by_id(self, symbol_id: int) -> SymbolView:
+        """The symbol with this id, or :class:`SymbolNotFoundError`.
+
+        Edges store their endpoints as ids, so this is what turns an
+        incoming call edge into a named caller. It is deliberately part of
+        this facade rather than something a caller reaches into ``storage``
+        for: an id from a *previous* generation no longer exists after a
+        reindex, and "no such symbol" is the honest answer for it.
+        """
+        symbol = self._storage.symbol_by_id(symbol_id)
+        if symbol is None:
+            raise SymbolNotFoundError(f"No symbol with id {symbol_id!r} found")
+        return _symbol_to_view(symbol)
+
     def search_symbols(self, query: str, *, limit: int = 50) -> list[SymbolView]:
         matches = self._storage.search_symbols(query, limit=limit)
         return [_symbol_to_view(match) for match in matches]

@@ -265,7 +265,17 @@ class LearningStore:
         db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        connection = sqlite3.connect(db_path, isolation_level=None)
+        # ``check_same_thread=False`` because the store is opened by whoever
+        # composes the application and then used from wherever a request is
+        # served, which is not the same thread. What makes that safe is that
+        # every caller uses one connection from one thread *at a time*: the
+        # web layer serves every handler that touches this store on its
+        # event-loop thread, and no handler awaits in the middle of a
+        # transaction. Concurrent use of a single connection would still be a
+        # bug, and this flag does not make it one less of a bug.
+        connection = sqlite3.connect(
+            db_path, isolation_level=None, check_same_thread=False
+        )
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA foreign_keys = ON")
 

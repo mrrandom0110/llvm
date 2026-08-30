@@ -271,7 +271,14 @@ class IndexStorage:
         db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        connection = sqlite3.connect(db_path, isolation_level=None)
+        # See :meth:`netstack_academy.learning.store.LearningStore.open` for
+        # why ``check_same_thread`` is off: the index is opened by whoever
+        # composes the application and read from whichever thread serves a
+        # request, and one connection is still only ever used from one thread
+        # at a time.
+        connection = sqlite3.connect(
+            db_path, isolation_level=None, check_same_thread=False
+        )
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA foreign_keys = ON")
 
@@ -459,6 +466,20 @@ class IndexStorage:
 
         rows = self._connection.execute(query, params).fetchall()
         return [_row_to_symbol(row) for row in rows]
+
+    def symbol_by_id(self, symbol_id: int) -> Symbol | None:
+        """One symbol by its row id, or ``None`` when no row has that id.
+
+        An edge stores its endpoints as ids, so this is how a caller turns
+        "something calls this symbol" into a caller worth naming.
+        """
+        row = self._connection.execute(
+            f"SELECT {', '.join(_SYMBOL_COLUMNS)} "
+            "FROM symbols JOIN commits ON commits.id = symbols.commit_id "
+            "WHERE symbols.id = ?",
+            (symbol_id,),
+        ).fetchone()
+        return _row_to_symbol(row) if row is not None else None
 
     def search_symbols(self, query: str, *, limit: int = 50) -> list[Symbol]:
         sanitized_query = _sanitize_fts_query(query)
