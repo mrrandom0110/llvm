@@ -117,4 +117,10 @@ def two_commit_git_repo(tmp_path: Path) -> tuple[Path, str, str]:
     )
     second_head = _commit_all(repo, "Tweak tcp_input")
 
+    # Leave the checked-out working tree at ``first_head``: callers rely on
+    # HEAD starting at ``first_head`` (matching the returned tuple) and
+    # explicitly checking out ``second_head`` themselves when they want to
+    # exercise commit-change detection.
+    _run_git("checkout", first_head, cwd=repo)
+
     return repo, first_head, second_head
