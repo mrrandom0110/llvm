@@ -42,7 +42,18 @@ PONG = {"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}}}
 
 
 @pytest.fixture
-def fake_popen(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingPopen]:
+def fake_popen(
+    monkeypatch: pytest.MonkeyPatch, git_repository: Path
+) -> Iterator[RecordingPopen]:
+    """Patch the ``Popen`` the transport actually calls, and nothing earlier.
+
+    ``transport.subprocess`` *is* the one shared ``subprocess`` module, so
+    this patch is global for the duration of the test. It therefore has to
+    land after every fixture that shells out -- ``git_repository`` runs
+    ``git`` through ``subprocess.run``, which is itself built on
+    ``subprocess.Popen``. Depending on it here fixes the setup order no
+    matter how a test happens to list its parameters.
+    """
     recorder = RecordingPopen()
     monkeypatch.setattr(transport_module.subprocess, "Popen", recorder)
     yield recorder
@@ -52,6 +63,7 @@ def fake_popen(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingPopen]:
 def _install_failing_popen(
     monkeypatch: pytest.MonkeyPatch, error: BaseException
 ) -> RecordingPopen:
+    """Patch ``Popen`` from inside a test body, i.e. after fixture setup."""
     recorder = RecordingPopen(error=error)
     monkeypatch.setattr(transport_module.subprocess, "Popen", recorder)
     return recorder

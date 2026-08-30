@@ -25,6 +25,13 @@ from lsp_fakes import RecordingPopen
 def _install_popen(
     monkeypatch: pytest.MonkeyPatch, recorder: RecordingPopen
 ) -> RecordingPopen:
+    """Patch the ``Popen`` the transport calls, from inside a test body.
+
+    ``transport.subprocess`` is the one shared ``subprocess`` module, so this
+    patch is global while it is installed; doing it here rather than in a
+    fixture keeps it strictly after ``git_repository`` (which shells out to
+    ``git``, and therefore through ``Popen``) has been built.
+    """
     monkeypatch.setattr(transport_module.subprocess, "Popen", recorder)
     return recorder
 

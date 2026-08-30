@@ -320,6 +320,12 @@ class RecordingPopen:
     binary), ``ignore_terminate`` to simulate a process that survives
     ``terminate()``, and ``serve=True`` to attach a :class:`FakeClangdServer`
     to each launched process so a real handshake can complete.
+
+    Patching ``Popen`` is unavoidably global (there is one ``subprocess``
+    module), so ``executables`` guards the blast radius: a launch of anything
+    else -- ``git`` from a repository fixture, say -- means the patch outlived
+    or preceded its intended scope, and fails loudly here instead of handing
+    unrelated code a fake process it cannot use.
     """
 
     def __init__(
@@ -329,6 +335,7 @@ class RecordingPopen:
         ignore_terminate: bool = False,
         serve: bool = False,
         results: dict[str, Any] | None = None,
+        executables: Sequence[str] | None = ("clangd",),
     ) -> None:
         self.calls: list[PopenCall] = []
         self.processes: list[FakeClangdProcess] = []
@@ -337,10 +344,12 @@ class RecordingPopen:
         self._ignore_terminate = ignore_terminate
         self._serve = serve
         self._results = results
+        self._executables = None if executables is None else tuple(executables)
 
     def __call__(self, argv: Any = None, **kwargs: Any) -> FakeClangdProcess:
         if argv is None:
             argv = kwargs.get("args")
+        self._reject_foreign_launch(argv)
         self.calls.append(PopenCall(argv=argv, kwargs=dict(kwargs)))
         if self._error is not None:
             raise self._error
@@ -360,6 +369,24 @@ class RecordingPopen:
             server.stop()
         for process in self.processes:
             process.cleanup()
+
+    def _reject_foreign_launch(self, argv: Any) -> None:
+        if self._executables is None:
+            return
+        if argv is None:
+            executable: Any = None
+        elif isinstance(argv, (str, bytes)):
+            executable = argv
+        else:
+            executable = next(iter(argv), None)
+        if executable in self._executables:
+            return
+        raise AssertionError(
+            f"the clangd process fake intercepted a launch of {executable!r}. "
+            "The subprocess.Popen patch is global, so it must be installed "
+            "after every fixture that shells out (make the patching fixture "
+            "depend on that fixture), or widened via executables=."
+        )
 
 
 class FakeClangdServer:
