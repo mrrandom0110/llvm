@@ -17,6 +17,9 @@ Schema overview
   ``site_line``, ``site_column``) so a semantically derived edge can
   deep-link to the position where the call/use actually happens.
 - ``symbols_fts`` — an FTS5 virtual table over symbol name/signature.
+  ``search_symbols`` never passes caller input to ``MATCH`` unescaped (see
+  :func:`_sanitize_fts_query`): arbitrary user text is rebuilt into quoted
+  phrases so it can never be parsed as FTS5 query syntax.
 
 ``replace_symbols_and_edges`` fully supersedes the previous generation
 (rather than appending to it) inside a single transaction: the prior
@@ -39,6 +42,7 @@ rows, and ends up with exactly the same schema as a freshly created one.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +51,20 @@ from typing import Any
 from .models import Edge, EdgeInput, ReplaceIndexResult, Symbol, SymbolInput
 
 SCHEMA_VERSION = 2
+
+# FTS5's MATCH grammar treats quotes, semicolons, boolean keywords (`AND`/
+# `OR`/`NOT`), bare wildcards, parentheses, and column-filter syntax
+# (`name:value`, `-name`) as *syntax*, not data -- any of those appearing
+# in ordinary user search text raises `sqlite3.OperationalError` if passed
+# to MATCH unescaped. `_sanitize_fts_query` below rebuilds a safe MATCH
+# expression from only the `\w+` "words" in the input, so no character
+# sequence a caller supplies can ever be interpreted as an operator.
+_QUERY_WORD_RE = re.compile(r"\w+")
+# A trailing `*` immediately after a word character (no space) is the
+# UI's intentional prefix/autocomplete query syntax and must keep working
+# as an *unquoted* prefix query -- quoting a phrase in FTS5 disables its
+# wildcard meaning, so this one case is deliberately not quoted below.
+_TRAILING_WILDCARD_RE = re.compile(r"\w\*\s*$")
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -140,6 +158,35 @@ _EDGE_COLUMNS = (
     "edges.site_line",
     "edges.site_column",
 )
+
+
+def _sanitize_fts_query(query: str) -> str | None:
+    """Build a safe FTS5 MATCH expression from arbitrary user search text.
+
+    Only the ``\\w+`` "words" found in ``query`` are kept; each is wrapped
+    in its own quoted phrase (defeating every FTS5 operator/special
+    meaning -- quotes, semicolons, ``AND``/``OR``/``NOT``, parentheses,
+    column filters) and the phrases are implicitly ANDed together, the
+    same as separate bare words would be. The one exception is a single
+    trailing ``word*`` (the ``*`` immediately after a word character, no
+    space): that is the UI's intentional prefix/autocomplete query, so the
+    last word is left *unquoted* with its trailing ``*``, preserving
+    FTS5's prefix-match behavior, which a fully quoted phrase would
+    disable.
+
+    Returns ``None`` when ``query`` contains no words at all (empty input,
+    or input made up only of punctuation/operators), so the caller can
+    skip querying FTS5 entirely rather than ask it to parse an empty
+    expression.
+    """
+    words = _QUERY_WORD_RE.findall(query)
+    if not words:
+        return None
+
+    clauses = [f'"{word}"' for word in words]
+    if _TRAILING_WILDCARD_RE.search(query):
+        clauses[-1] = f"{words[-1]}*"
+    return " ".join(clauses)
 
 
 def _row_to_symbol(row: tuple[Any, ...]) -> Symbol:
@@ -414,6 +461,10 @@ class IndexStorage:
         return [_row_to_symbol(row) for row in rows]
 
     def search_symbols(self, query: str, *, limit: int = 50) -> list[Symbol]:
+        sanitized_query = _sanitize_fts_query(query)
+        if sanitized_query is None:
+            return []
+
         sql = (
             f"SELECT {', '.join(_SYMBOL_COLUMNS)} "
             "FROM symbols_fts "
@@ -423,7 +474,7 @@ class IndexStorage:
             "ORDER BY rank "
             "LIMIT ?"
         )
-        rows = self._connection.execute(sql, (query, limit)).fetchall()
+        rows = self._connection.execute(sql, (sanitized_query, limit)).fetchall()
         return [_row_to_symbol(row) for row in rows]
 
     def outgoing_edges(self, symbol_id: int) -> list[Edge]:

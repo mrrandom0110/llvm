@@ -162,7 +162,11 @@ def run_ctags(
     silently skipped. Timeouts and OS-level failures degrade to a typed
     result instead of raising.
     """
-    availability = check_ctags_binary(executable)
+    # The probe and the indexing subprocess below share the caller's
+    # ``timeout`` rather than each defaulting independently, so a caller
+    # with a tight overall latency budget has that budget honored
+    # coherently by both invocations, not just the second one.
+    availability = check_ctags_binary(executable, timeout=timeout)
     if not availability.available:
         return CtagsRunResult(
             status="unavailable",
@@ -179,11 +183,23 @@ def run_ctags(
     selected_roots = list(roots) if roots is not None else list(default_index_roots())
     existing_roots = _existing_roots(kernel_repo, selected_roots)
 
+    if not existing_roots:
+        # No path operands to give ctags: `ctags -R` with zero path
+        # operands still recursively scans `cwd`, which would silently
+        # defeat the entire point of a curated, bounded root list. Degrade
+        # to a benign, empty result instead of ever launching that
+        # unbounded scan.
+        return CtagsRunResult(
+            status="ok",
+            definitions=[],
+            diagnostics=["no configured roots exist on disk; skipped ctags"],
+        )
+
     args = [
         executable,
         "--languages=C",
         "--output-format=json",
-        "--fields=+n",
+        "--fields=+nS",
         "-R",
         *existing_roots,
     ]

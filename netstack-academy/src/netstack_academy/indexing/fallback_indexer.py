@@ -26,7 +26,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from .ctags_runner import default_index_roots
 from .paths import normalize_relative_path
+
+# Network headers commonly define `static inline` helpers directly in the
+# `.h` file (never just prototypes), so both source and header extensions
+# are scanned -- restricting to `.c` alone would silently miss them.
+_SOURCE_SUFFIXES: tuple[str, ...] = (".c", ".h")
 
 _CONTROL_KEYWORDS = frozenset(
     {
@@ -121,9 +127,15 @@ def _iter_source_files(kernel_repo: Path, roots: Iterable[str]) -> Iterator[Path
         if not root_path.exists():
             continue
         if root_path.is_file():
-            candidates: Iterable[Path] = (root_path,) if root_path.suffix == ".c" else ()
+            candidates: Iterable[Path] = (
+                (root_path,) if root_path.suffix in _SOURCE_SUFFIXES else ()
+            )
         else:
-            candidates = sorted(root_path.rglob("*.c"))
+            candidates = sorted(
+                match
+                for suffix in _SOURCE_SUFFIXES
+                for match in root_path.rglob(f"*{suffix}")
+            )
         for candidate in candidates:
             if candidate not in seen:
                 seen.add(candidate)
@@ -260,8 +272,14 @@ def _resolve_edges(
 def index_fallback(
     kernel_repo: Path, *, roots: Iterable[str] | None = None
 ) -> FallbackIndexResult:
-    """Scan C sources under ``roots`` for function definitions and calls."""
-    selected_roots = list(roots) if roots is not None else ["."]
+    """Scan C sources under ``roots`` for function definitions and calls.
+
+    With no ``roots`` argument, the scan is bounded to the same curated,
+    network-focused root list ctags uses (:func:`default_index_roots`) --
+    never a whole-repo scan -- so an unrelated tree is never touched just
+    because a caller omitted ``roots``.
+    """
+    selected_roots = list(roots) if roots is not None else list(default_index_roots())
 
     all_symbols: list[FallbackSymbol] = []
     all_raw_calls: list[_RawCall] = []

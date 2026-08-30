@@ -56,7 +56,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from ..repo_inspector import inspect_repository
-from .ctags_runner import CtagsRunResult
+from .ctags_runner import CtagsRunResult, default_index_roots
 from .ctags_runner import run_ctags as _default_ctags_runner
 from .fallback_indexer import FallbackEdge, FallbackIndexResult
 from .fallback_indexer import index_fallback as _default_fallback_indexer
@@ -542,10 +542,19 @@ class IndexOrchestrator:
         provider_diagnostics: list[ProviderDiagnostic] = []
         diagnostics: list[str] = []
 
-        ctags_result = self._ctags_runner(self._kernel_repo)
+        # Both collectors are handed the *same* curated, network-focused
+        # root list computed once here, rather than each independently
+        # falling back to its own notion of "everything" (ctags' own
+        # default happens to already be this list, but the fallback
+        # indexer's own default is a whole-repo "."). Centralizing it
+        # guarantees the two collectors can never silently disagree about
+        # what "the index" covers.
+        roots = default_index_roots()
+
+        ctags_result = self._ctags_runner(self._kernel_repo, roots=roots)
         provider_diagnostics.append(_ctags_diagnostic(ctags_result))
 
-        fallback_result = self._fallback_indexer(self._kernel_repo)
+        fallback_result = self._fallback_indexer(self._kernel_repo, roots=roots)
 
         symbols, edges = _merge_collectors(ctags_result, fallback_result)
 
