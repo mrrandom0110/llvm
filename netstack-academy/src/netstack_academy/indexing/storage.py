@@ -388,6 +388,16 @@ class IndexStorage:
         combined.sort(key=lambda edge: edge.id)
         return combined
 
+    def symbol_count(self) -> int:
+        """Number of symbols in the currently indexed generation."""
+        row = self._connection.execute("SELECT COUNT(*) FROM symbols").fetchone()
+        return row[0] if row is not None else 0
+
+    def edge_count(self) -> int:
+        """Number of edges in the currently indexed generation."""
+        row = self._connection.execute("SELECT COUNT(*) FROM edges").fetchone()
+        return row[0] if row is not None else 0
+
     def close(self) -> None:
         self._connection.close()
 
