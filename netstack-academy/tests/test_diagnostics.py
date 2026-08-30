@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest.mock import ANY
 
 import pytest
 from fastapi.testclient import TestClient
@@ -123,7 +124,7 @@ def test_diagnostics_returns_200_with_invalid_test_symbol_line_configuration(
     payload = response.json()
     assert payload["configuration"]["valid"] is False
     assert payload["configuration"]["errors"] == [
-        {"field": "TEST_SYMBOL_LINE", "message": pytest.ANY},
+        {"field": "TEST_SYMBOL_LINE", "message": ANY},
     ]
     assert payload["test_symbol"]["resolvable"] is False
     assert payload["test_symbol"]["deep_link"] is None
@@ -148,7 +149,7 @@ def test_diagnostics_returns_200_with_invalid_test_symbol_column_configuration(
     payload = response.json()
     assert payload["configuration"]["valid"] is False
     assert payload["configuration"]["errors"] == [
-        {"field": "TEST_SYMBOL_COLUMN", "message": pytest.ANY},
+        {"field": "TEST_SYMBOL_COLUMN", "message": ANY},
     ]
     assert payload["test_symbol"]["resolvable"] is False
     assert payload["test_symbol"]["deep_link"] is None

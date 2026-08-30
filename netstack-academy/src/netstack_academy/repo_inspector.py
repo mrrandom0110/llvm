@@ -41,7 +41,7 @@ def inspect_repository(path: Path) -> RepositoryState:
         return RepositoryState(
             available=False,
             head=None,
-            reason="Git inspection timed out",
+            reason="Git inspection timeout",
         )
     except FileNotFoundError:
         return RepositoryState(
