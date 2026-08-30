@@ -38,8 +38,15 @@ class JsonRpcFramingError(ValueError):
 
 
 def encode_message(payload: dict) -> bytes:
-    """Frame ``payload`` as a single LSP ``Content-Length``-delimited message."""
-    body = json.dumps(payload).encode("utf-8")
+    """Frame ``payload`` as a single LSP ``Content-Length``-delimited message.
+
+    JSON-RPC over LSP is UTF-8, not ASCII: serialize with
+    ``ensure_ascii=False`` so non-ASCII text is preserved as itself rather
+    than escaped to ``\\uXXXX`` sequences, while still declaring
+    ``Content-Length`` as the number of UTF-8-encoded *bytes* (not
+    characters) of that body, per the framing contract above.
+    """
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
     return header + body
 
