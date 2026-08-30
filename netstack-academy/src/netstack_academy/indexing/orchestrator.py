@@ -37,7 +37,15 @@ committed together as one generation -- and a reindex at a new ``HEAD``
 therefore drops the previous generation's semantic edges atomically along
 with everything else.
 
-It runs only when a semantic provider was injected *and* reports
+A semantic provider reaches this stage either because it was injected
+directly (``semantic_provider=``, the caller already owns its lifetime), or
+because a ``semantic_provider_factory=`` was given instead: in that case
+``_reindex`` -- and only ``_reindex`` -- calls it, lazily and at most once
+per orchestrator instance, the first time a reindex actually happens. A
+``"reused"`` run never reaches ``_reindex`` at all, so it never calls the
+factory; a real ``clangd`` process is therefore only ever spawned when
+there is genuinely new work for it to do. Either way, enrichment itself
+runs only when the resulting provider reports
 ``capabilities().available``; an unavailable provider (no ``clangd``, a
 dead session) is never asked for a single position. Each indexed function
 costs up to three synchronous provider round trips, so
@@ -80,6 +88,14 @@ IndexRunStatus = Literal["reused", "reindexed", "failed"]
 
 CtagsRunnerCallable = Callable[..., CtagsRunResult]
 FallbackIndexerCallable = Callable[..., FallbackIndexResult]
+
+#: Called with the kernel repository to index, lazily and at most once per
+#: orchestrator instance, only from inside ``_reindex`` -- never merely to
+#: decide whether a reindex is needed. Must not raise for a missing or
+#: unstartable provider (production's ``create_clangd_provider`` returns an
+#: unavailable provider instead), so a reindex never fails just because
+#: ``clangd`` could not be started.
+SemanticProviderFactory = Callable[[Path], SemanticProvider]
 
 #: Conservative default cap on how many functions one ``ensure_index()`` run
 #: enriches with the semantic provider, applied whenever a caller does not
@@ -474,20 +490,24 @@ def _enrich_with_semantic_edges(
     return _merge_edge_batches(edges, semantic_edges)
 
 
-class _Unset:
+class UnsetType:
     """Sentinel type distinguishing "argument omitted" from "explicit ``None``".
 
     Used only for ``semantic_symbol_limit`` below: omitting the argument
     must select :data:`DEFAULT_SEMANTIC_SYMBOL_LIMIT`, while explicitly
     passing ``None`` must still mean "unbounded" -- a plain ``None``
-    default cannot represent both.
+    default cannot represent both. Named without a leading underscore (and
+    exported alongside :data:`UNSET_SYMBOL_LIMIT`) because
+    :mod:`.composition` -- the real composition root -- reuses this exact
+    sentinel in its own public ``run_indexing_session`` signature rather
+    than inventing a second one.
     """
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid only
         return "<unset>"
 
 
-_UNSET_SYMBOL_LIMIT = _Unset()
+UNSET_SYMBOL_LIMIT = UnsetType()
 
 
 class IndexOrchestrator:
@@ -501,13 +521,26 @@ class IndexOrchestrator:
         ctags_runner: CtagsRunnerCallable = _default_ctags_runner,
         fallback_indexer: FallbackIndexerCallable = _default_fallback_indexer,
         semantic_provider: SemanticProvider | None = None,
-        semantic_symbol_limit: int | None | _Unset = _UNSET_SYMBOL_LIMIT,
+        semantic_provider_factory: SemanticProviderFactory | None = None,
+        semantic_symbol_limit: int | None | UnsetType = UNSET_SYMBOL_LIMIT,
     ) -> None:
+        if semantic_provider is not None and semantic_provider_factory is not None:
+            raise ValueError(
+                "IndexOrchestrator accepts either semantic_provider or "
+                "semantic_provider_factory, not both -- passing both leaves "
+                "it ambiguous which one should actually supply the "
+                "semantic provider."
+            )
         self._kernel_repo = Path(kernel_repo)
         self._storage = storage
         self._ctags_runner = ctags_runner
         self._fallback_indexer = fallback_indexer
         self._semantic_provider = semantic_provider
+        # Not called here: a factory is only ever invoked lazily, from
+        # inside ``_reindex``, the first time this instance actually
+        # reindexes (see ``_reindex`` below) -- never merely to decide
+        # whether one is needed.
+        self._semantic_provider_factory = semantic_provider_factory
         # Each enriched symbol costs up to three synchronous provider round
         # trips, so the budget is explicit. Omitting the argument selects
         # the conservative ``DEFAULT_SEMANTIC_SYMBOL_LIMIT``; passing
@@ -515,7 +548,7 @@ class IndexOrchestrator:
         # a small tree or a fast provider.
         self._semantic_symbol_limit = (
             DEFAULT_SEMANTIC_SYMBOL_LIMIT
-            if semantic_symbol_limit is _UNSET_SYMBOL_LIMIT
+            if semantic_symbol_limit is UNSET_SYMBOL_LIMIT
             else semantic_symbol_limit
         )
         self._closed = False
@@ -576,10 +609,15 @@ class IndexOrchestrator:
     def close(self) -> None:
         """Release an owned semantic provider, if it has anything to release.
 
-        ``close()`` is optional on the provider contract (a stub, or a
-        provider with nothing to tear down, may simply not have it), so it
-        is looked up at runtime. Idempotent, and never raises: teardown
-        failures must not surface as indexing failures.
+        Covers a provider however it got here -- directly injected via
+        ``semantic_provider=``, or lazily created via
+        ``semantic_provider_factory=`` inside ``_reindex`` -- since both are
+        stored on the same ``self._semantic_provider`` and this orchestrator
+        owns either one equally. ``close()`` is optional on the provider
+        contract (a stub, or a provider with nothing to tear down, may
+        simply not have it), so it is looked up at runtime. Idempotent, and
+        never raises: teardown failures must not surface as indexing
+        failures.
         """
         if self._closed:
             return
@@ -594,6 +632,18 @@ class IndexOrchestrator:
             pass
 
     def _reindex(self, head: str | None) -> IndexRunResult:
+        # A provider factory is only ever called from here -- lazily, and
+        # at most once per orchestrator instance -- because reaching
+        # ``_reindex`` at all already means ``ensure_index`` decided a real
+        # reindex (not a ``"reused"`` run) is happening. A ``None`` check
+        # rather than an unconditional call keeps a *directly injected*
+        # provider (``semantic_provider=``) untouched, and keeps a repeated
+        # ``_reindex`` on the same instance (e.g. two ``force=True`` calls,
+        # or a later ``HEAD`` change) from spawning a second ``clangd``
+        # process for a provider it already owns.
+        if self._semantic_provider is None and self._semantic_provider_factory is not None:
+            self._semantic_provider = self._semantic_provider_factory(self._kernel_repo)
+
         provider_diagnostics: list[ProviderDiagnostic] = []
         diagnostics: list[str] = []
 

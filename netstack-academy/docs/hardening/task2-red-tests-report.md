@@ -403,3 +403,150 @@ against the current, unmodified `src/` is the recommended next step to
 confirm all RED tests above fail as described and no previously-green
 test in the suite is affected (this is a new file; nothing existing was
 edited).
+
+---
+
+## Fix implementation for finding 6 (follow-up change, commit `fix: start clangd only for reindexing`)
+
+Per instruction for this change, **no test file was modified and the test
+suite was not run via pytest** to confirm the RED→GREEN transition. Only
+`src/` files were touched: `orchestrator.py` and `composition.py`. No test
+file was modified. As a lightweight sanity check that does not count as
+"running the tests" (it exercises none of the files under `tests/`), a
+short one-off script imported both modules directly and exercised the new
+code paths (reindex-then-reuse, `force=True`, and the
+`semantic_provider`/`semantic_provider_factory` ambiguity check) against a
+real temporary git repository; all four checks behaved as intended. The
+test-by-test mapping below is the actual verification artifact, derived by
+reading each test's exact assertions against the new production code.
+
+### `IndexOrchestrator`
+
+- `__init__` gained `semantic_provider_factory: SemanticProviderFactory |
+  None = None`, a new type alias (`Callable[[Path], SemanticProvider]`,
+  moved here from `composition.py` -- see "Sentinel/type cleanup" below).
+  Passing both `semantic_provider` and `semantic_provider_factory` now
+  raises `ValueError` before anything else happens in `__init__`. Satisfies
+  `test_orchestrator_accepts_a_semantic_provider_factory_and_does_not_call_it_eagerly`
+  and `test_orchestrator_rejects_simultaneous_semantic_provider_and_factory`.
+- The factory itself is **not** called in `__init__`; it is stored on
+  `self._semantic_provider_factory` untouched.
+- `_reindex` now opens with:
+  ```python
+  if self._semantic_provider is None and self._semantic_provider_factory is not None:
+      self._semantic_provider = self._semantic_provider_factory(self._kernel_repo)
+  ```
+  before anything else (before `ctags_runner`/`fallback_indexer` even
+  run). Because `_reindex` is only ever reached once `ensure_index` has
+  already decided a real reindex is happening (not a `"reused"` run),
+  this is exactly "lazy, and only inside `_reindex`". The `is None` guard
+  means: (a) a directly-injected `semantic_provider` is never overwritten
+  or re-created, and (b) a second `_reindex` on the same orchestrator
+  instance (e.g. a later `force=True` call, or a genuine `HEAD` change)
+  reuses the already-created provider instead of calling the factory
+  again -- "once per orchestrator instance". Satisfies
+  `test_orchestrator_creates_the_factory_provider_exactly_once_while_reindexing`.
+- Reuse (`ensure_index` returning `"reused"` without calling `_reindex` at
+  all) was already correct before this change (established by finding-6's
+  own earlier commits); this fix only had to avoid regressing it while
+  adding the factory. Satisfies
+  `test_orchestrator_never_calls_provider_factory_when_persisted_head_already_matches`
+  and, at the composition-root level,
+  `test_run_indexing_session_never_calls_provider_factory_when_index_is_reused`.
+- `close()`'s existing implementation (`getattr(self._semantic_provider,
+  "close", None)`) needed no change: it already tears down whichever
+  provider ended up on `self._semantic_provider`, regardless of whether it
+  arrived via direct injection or lazy factory creation. Only its
+  docstring was updated to say so explicitly.
+- `test_orchestrator_still_supports_direct_semantic_provider_injection_without_a_factory`
+  (green before this change) remains green: `semantic_provider=` with no
+  factory takes the same code path as before (`_semantic_provider_factory`
+  is `None`, so the new lazy-creation branch's condition is false).
+
+### `composition.py` (`run_indexing_session`)
+
+- No longer calls `semantic_provider_factory(repo)` itself. Instead
+  forwards `semantic_provider_factory=semantic_provider_factory` straight
+  into `IndexOrchestrator(...)`, which owns calling it lazily as described
+  above. Satisfies
+  `test_run_indexing_session_never_calls_provider_factory_when_index_is_reused`.
+- Gained `force: bool = False`. Rather than always forwarding
+  `orchestrator.ensure_index(force=force)`, the call only includes `force`
+  in its kwargs when it is actually `True`:
+  ```python
+  ensure_index_kwargs = {"force": True} if force else {}
+  return orchestrator.ensure_index(**ensure_index_kwargs)
+  ```
+  This was a deliberate compatibility choice, not an oversight: two
+  existing, unmodified tests in `test_semantic_enrichment.py`
+  (`test_run_indexing_session_defaults_to_the_finite_symbol_budget_when_omitted`
+  and `test_run_indexing_session_still_honors_explicit_none_as_unbounded`)
+  monkeypatch `composition.IndexOrchestrator` with a `_RecordingOrchestrator`
+  test double whose `ensure_index(self)` takes **no** `force` parameter at
+  all. Always calling `ensure_index(force=force)` -- even with
+  `force=False` -- would raise `TypeError: ensure_index() got an
+  unexpected keyword argument 'force'` against that double, since Python
+  keyword-argument binding does not care about the *value* passed, only
+  whether the parameter exists. Omitting the kwarg entirely when `force`
+  is `False` is behaviourally identical for the real
+  `IndexOrchestrator.ensure_index(self, *, force: bool = False)` (an
+  omitted keyword-only argument with a default *is* that default), while
+  remaining source-compatible with any older double that predates this
+  parameter. Satisfies
+  `test_run_indexing_session_exposes_force_to_bypass_persisted_reuse` and
+  `test_run_indexing_session_force_still_lazily_starts_the_provider_exactly_once`,
+  without breaking the two pre-existing symbol-budget tests just named.
+- `test_composition_closes_the_provider_after_enrichment` and
+  `test_composition_closes_the_provider_when_reindexing_fails` (both green
+  before this change) remain green: creating the provider at the very top
+  of `_reindex` -- before `ctags_runner`/`fallback_indexer` run -- means a
+  provider is created (and therefore later closed by `orchestrator.close()`
+  in `run_indexing_session`'s `finally`) even when a collector fails
+  immediately afterward, exactly matching the close-once-per-run behavior
+  these two tests already pinned down for the previous eager-creation
+  design.
+
+### Sentinel/type cleanup (touched directly by this change)
+
+- `SemanticProviderFactory = Callable[[Path], SemanticProvider]` moved
+  from `composition.py` into `orchestrator.py` (next to
+  `CtagsRunnerCallable`/`FallbackIndexerCallable`, the other
+  orchestrator-owned callable aliases), since `IndexOrchestrator.__init__`
+  now needs it too; `composition.py` imports and re-exports it instead of
+  defining its own copy.
+- `orchestrator._Unset` / `orchestrator._UNSET_SYMBOL_LIMIT` renamed to
+  `orchestrator.UnsetType` / `orchestrator.UNSET_SYMBOL_LIMIT` (no leading
+  underscore). These were already imported and used directly in
+  `composition.py`'s own public `run_indexing_session` signature -- a
+  private-by-convention name leaking across a module boundary into another
+  module's public API -- and this change touches that exact function
+  signature (to add `force`) and that exact import block (to add
+  `SemanticProviderFactory`), so the stale naming was cleaned up in place
+  rather than left to drift further. Confirmed by repo-wide search that no
+  test file references either old name directly (only `composition.py`
+  and `orchestrator.py` did), so this rename could not affect test
+  behavior.
+- The orphaned `#: Re-exported ...` Sphinx-style comment above
+  `SemanticProviderFactory` in `composition.py` (separated from the import
+  statement it was meant to document by a blank line, so it did not
+  actually attach to anything) was replaced with a single plain comment
+  block describing everything re-exported from `orchestrator` for
+  downstream convenience.
+
+### Concerns / outstanding verification
+
+- **The test suite was not executed via pytest for this change**, per
+  instruction. Verification is the test-by-test trace above, plus one
+  ad hoc, non-pytest script (described at the top of this section) that
+  imported the two modified modules and exercised reindex-then-reuse,
+  `force=True`, and the ambiguity check against a real temporary git
+  repository. Running the full suite
+  (`python3 -m pytest tests/ -q`) is the recommended next step to confirm
+  all of `test_lazy_semantic_startup.py` now passes and nothing else
+  regressed.
+- The `force`-forwarding compatibility shim (`{"force": True} if force
+  else {}`) is intentionally conditional rather than unconditional,
+  specifically to avoid breaking the two `_RecordingOrchestrator`-based
+  tests described above. If those tests are ever updated to accept
+  `force` in their stub's `ensure_index`, the shim in `composition.py`
+  could be simplified back to an unconditional `ensure_index(force=force)`.

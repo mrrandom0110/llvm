@@ -2,13 +2,20 @@
 
 A live semantic provider is a real ``clangd`` process (see
 ``semantic/factory.py``): whoever starts it must stop it. ``IndexOrchestrator``
-deliberately does not, because an injected provider may outlive many
-``ensure_index()`` calls -- so something above it has to own that lifetime.
-That is this module.
+deliberately does not decide *when* to start one on its own behalf -- that
+policy question (start it at all? start it now, or only once a reindex is
+actually happening?) belongs one layer up, in this module.
 
 :func:`run_indexing_session` takes a *factory* rather than a provider
-instance precisely so the session owns what it creates: it starts the
-provider, indexes once, and closes the provider in a ``finally`` -- after
+instance so that the underlying ``clangd`` process is never started for a
+run that turns out to be a no-op: the factory is forwarded to
+``IndexOrchestrator`` unchanged, which calls it itself, lazily, from inside
+``_reindex`` -- i.e. only once the persisted-``HEAD`` reuse check has
+already decided a real reindex is happening, and at most once per session.
+A ``"reused"`` run therefore never spawns ``clangd`` at all. Either way,
+the session still owns what gets created: ``orchestrator.close()`` in a
+``finally`` closes whatever provider ended up on the orchestrator --
+lazily created or (on the reused path) never created at all -- after
 enrichment on the success path, and equally when the run reports
 ``"failed"``. Because ``IndexOrchestrator.ensure_index`` already converts
 every pipeline failure into a ``"failed"`` result rather than an exception,
@@ -18,30 +25,27 @@ the previously indexed generation is left intact in both cases.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
 
 from .ctags_runner import run_ctags as _default_ctags_runner
 from .fallback_indexer import index_fallback as _default_fallback_indexer
 from .orchestrator import (
     DEFAULT_SEMANTIC_SYMBOL_LIMIT,
+    UNSET_SYMBOL_LIMIT,
     CtagsRunnerCallable,
     FallbackIndexerCallable,
     IndexOrchestrator,
     IndexRunResult,
-    _Unset,
-    _UNSET_SYMBOL_LIMIT,
+    SemanticProviderFactory,
+    UnsetType,
 )
-from .semantic.provider import SemanticProvider
 from .storage import IndexStorage
 
-#: Re-exported (via the import above) so callers/tests can reference the
-#: composition root's own default as ``composition.DEFAULT_SEMANTIC_SYMBOL_LIMIT``
-#: without reaching into :mod:`.orchestrator` directly.
-
-#: Called with the kernel repository to index; must not raise for a missing
-#: or unstartable provider (``create_clangd_provider`` returns an
-#: unavailable provider instead), so a session never fails to start.
-SemanticProviderFactory = Callable[[Path], SemanticProvider]
+# ``DEFAULT_SEMANTIC_SYMBOL_LIMIT``, ``SemanticProviderFactory``,
+# ``UnsetType``, and ``UNSET_SYMBOL_LIMIT`` are re-exported (via the import
+# above) so callers/tests can reference them as, e.g.,
+# ``composition.DEFAULT_SEMANTIC_SYMBOL_LIMIT`` without reaching into
+# :mod:`.orchestrator` directly -- this is the composition root real callers
+# go through, so its own public names are the ones worth depending on.
 
 
 def run_indexing_session(
@@ -51,9 +55,25 @@ def run_indexing_session(
     semantic_provider_factory: SemanticProviderFactory,
     ctags_runner: CtagsRunnerCallable = _default_ctags_runner,
     fallback_indexer: FallbackIndexerCallable = _default_fallback_indexer,
-    semantic_symbol_limit: int | None | _Unset = _UNSET_SYMBOL_LIMIT,
+    semantic_symbol_limit: int | None | UnsetType = UNSET_SYMBOL_LIMIT,
+    force: bool = False,
 ) -> IndexRunResult:
-    """Index ``kernel_repo`` once with a freshly created semantic provider.
+    """Index ``kernel_repo`` once, starting a semantic provider only if needed.
+
+    ``semantic_provider_factory`` is handed to :class:`IndexOrchestrator`
+    verbatim rather than called here: the orchestrator itself decides
+    whether it is ever invoked, lazily and at most once, from inside its
+    own reindex path. A session whose persisted index already matches the
+    repository's current ``HEAD`` (``force=False``, the default) therefore
+    never starts ``clangd`` at all.
+
+    ``force`` mirrors :meth:`IndexOrchestrator.ensure_index`'s own
+    keyword-only flag: ``True`` always reruns the full collection pipeline
+    -- and, on that path, still starts the semantic provider lazily rather
+    than up front -- even though the persisted ``HEAD`` already matches.
+    This is the composition root's own explicit "refresh now" escape
+    hatch, so a caller does not need to reach past ``run_indexing_session``
+    into ``IndexOrchestrator`` directly to force a rerun.
 
     ``semantic_symbol_limit`` defaults to :data:`DEFAULT_SEMANTIC_SYMBOL_LIMIT`
     when omitted -- this is the composition root real callers go through, so
@@ -64,11 +84,10 @@ def run_indexing_session(
     from simply omitting the argument.
     """
     repo = Path(kernel_repo)
-    provider = semantic_provider_factory(repo)
 
     resolved_symbol_limit = (
         DEFAULT_SEMANTIC_SYMBOL_LIMIT
-        if semantic_symbol_limit is _UNSET_SYMBOL_LIMIT
+        if semantic_symbol_limit is UNSET_SYMBOL_LIMIT
         else semantic_symbol_limit
     )
 
@@ -77,10 +96,17 @@ def run_indexing_session(
         storage,
         ctags_runner=ctags_runner,
         fallback_indexer=fallback_indexer,
-        semantic_provider=provider,
+        semantic_provider_factory=semantic_provider_factory,
         semantic_symbol_limit=resolved_symbol_limit,
     )
+    # ``force`` is only ever passed through when actually requested, rather
+    # than always forwarding ``force=force``: ``IndexOrchestrator.ensure_index``
+    # already defaults to ``force=False``, so an omitted-``force`` call
+    # behaves identically either way for the real orchestrator, while still
+    # working against any test double whose ``ensure_index()`` predates
+    # this parameter and does not accept it at all.
+    ensure_index_kwargs = {"force": True} if force else {}
     try:
-        return orchestrator.ensure_index()
+        return orchestrator.ensure_index(**ensure_index_kwargs)
     finally:
         orchestrator.close()
