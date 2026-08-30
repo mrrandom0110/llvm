@@ -118,9 +118,15 @@ class _Orchestrator(Protocol):
     :class:`~netstack_academy.indexing.orchestrator.IndexOrchestrator`
     directly) so tests can inject a stub orchestrator without constructing
     a real one.
+
+    ``force`` mirrors
+    :meth:`~netstack_academy.indexing.orchestrator.IndexOrchestrator.ensure_index`'s
+    own keyword-only flag: ``False`` (the default) reuses the persisted
+    index when it already matches the repository's current ``HEAD``;
+    ``True`` always reruns the collection pipeline.
     """
 
-    def ensure_index(self) -> IndexRunResult: ...
+    def ensure_index(self, *, force: bool = False) -> IndexRunResult: ...
 
 
 def _symbol_to_view(symbol: Symbol) -> SymbolView:
@@ -180,8 +186,28 @@ class IndexService:
         )
 
     def ensure_index(self) -> IndexRunResult:
-        """Delegate verbatim to the injected orchestrator."""
-        return self._orchestrator.ensure_index()
+        """Reuse the persisted index when it already matches repo ``HEAD``.
+
+        The cheap, common trigger: delegates to the injected orchestrator
+        without forcing a rerun, so a caller that polls this on every
+        request pays for collection/enrichment only when something has
+        actually changed. See :meth:`force_reindex` for the explicit,
+        always-rerun alternative.
+        """
+        return self._orchestrator.ensure_index(force=False)
+
+    def force_reindex(self) -> IndexRunResult:
+        """Always rerun the collection pipeline, ignoring persisted reuse.
+
+        For testing provider failures or a manual "refresh now" trigger --
+        cases that specifically need the pipeline to actually execute
+        rather than silently reuse a persisted, same-``HEAD`` index. A
+        failure here still preserves the previously indexed generation
+        (the "last good index"): see
+        :class:`~netstack_academy.indexing.orchestrator.IndexOrchestrator`'s
+        own module docstring for the atomicity guarantee this relies on.
+        """
+        return self._orchestrator.ensure_index(force=True)
 
     def find_symbol(self, name: str, *, relative_path: str | None = None) -> SymbolView:
         if relative_path is not None:
@@ -209,10 +235,22 @@ class IndexService:
         return [_symbol_to_view(match) for match in matches]
 
     def outgoing_edges(self, symbol_id: int) -> list[EdgeView]:
-        return [_edge_to_view(edge) for edge in self._storage.outgoing_edges(symbol_id)]
+        """Call-graph edges (``edge_type == "call"``) where this symbol calls out.
+
+        ``reference`` edges touching this symbol (e.g. a semantic
+        ``textDocument/references`` hit anchored here) are never included --
+        see :meth:`references` for those.
+        """
+        edges = self._storage.outgoing_edges(symbol_id)
+        return [_edge_to_view(edge) for edge in edges if edge.edge_type == "call"]
 
     def incoming_edges(self, symbol_id: int) -> list[EdgeView]:
-        return [_edge_to_view(edge) for edge in self._storage.incoming_edges(symbol_id)]
+        """Call-graph edges (``edge_type == "call"``) where this symbol is called.
+
+        Same ``reference``-exclusion contract as :meth:`outgoing_edges`.
+        """
+        edges = self._storage.incoming_edges(symbol_id)
+        return [_edge_to_view(edge) for edge in edges if edge.edge_type == "call"]
 
     def references(self, symbol_id: int) -> list[EdgeView]:
         """Non-call reference edges (``edge_type == "reference"``) touching this symbol.

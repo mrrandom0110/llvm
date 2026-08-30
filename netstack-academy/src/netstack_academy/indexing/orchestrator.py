@@ -7,18 +7,26 @@ current ``HEAD``:
 - If the repository itself is unavailable (missing path, not a git repo,
   ``git`` timeout, ...), the run is reported as ``"failed"`` *without*
   touching ``storage`` at all -- there is nothing to reuse or replace.
-- If this orchestrator instance has already verified the index against the
-  current ``HEAD`` (tracked in-memory, per instance, since the last time
-  *this* instance successfully reindexed), the run is reported as
-  ``"reused"`` without invoking any provider -- ctags, the fallback
-  indexer, and the semantic provider are all skipped entirely.
-- Otherwise a full reindex is attempted: ctags (authoritative definitions,
-  when available) and the regex fallback indexer (heuristic call edges --
-  always run, since ctags alone has no call graph) are both invoked, their
-  output is merged into a single ``SymbolInput``/``EdgeInput`` batch, an
-  *available* semantic provider is asked to enrich that batch, and the
-  result is committed via ``storage.replace_symbols_and_edges`` in one
-  atomic transaction.
+- Otherwise, unless ``force=True`` was requested, ``ensure_index`` compares
+  the repository's current ``HEAD`` against ``storage.current_head()`` --
+  the *persisted* generation, read straight from ``storage`` rather than
+  from any in-memory, per-instance bookkeeping. When they match, the run is
+  reported as ``"reused"`` without invoking any provider -- ctags, the
+  fallback indexer, and the semantic provider are all skipped entirely.
+  Because this comparison is against ``storage`` itself, reuse works across
+  a newly constructed ``IndexOrchestrator``/session pointed at the same
+  on-disk index, not only across repeated calls on one long-lived instance.
+- ``force=True`` skips that comparison unconditionally and always runs the
+  full pipeline below, even when the persisted ``HEAD`` already matches --
+  the explicit escape hatch for testing provider failures or a manual
+  "refresh now" trigger.
+- Otherwise (no persisted match, or ``force=True``) a full reindex is
+  attempted: ctags (authoritative definitions, when available) and the
+  regex fallback indexer (heuristic call edges -- always run, since ctags
+  alone has no call graph) are both invoked, their output is merged into a
+  single ``SymbolInput``/``EdgeInput`` batch, an *available* semantic
+  provider is asked to enrich that batch, and the result is committed via
+  ``storage.replace_symbols_and_edges`` in one atomic transaction.
 
 Semantic enrichment
 -------------------
@@ -33,7 +41,9 @@ It runs only when a semantic provider was injected *and* reports
 ``capabilities().available``; an unavailable provider (no ``clangd``, a
 dead session) is never asked for a single position. Each indexed function
 costs up to three synchronous provider round trips, so
-``semantic_symbol_limit`` bounds how many symbols are enriched per run.
+``semantic_symbol_limit`` bounds how many symbols are enriched per run --
+omitting it selects the conservative :data:`DEFAULT_SEMANTIC_SYMBOL_LIMIT`
+(200); passing ``None`` explicitly opts into unbounded enrichment instead.
 Every operation is isolated: a ``"timeout"``/``"error"``/``"unavailable"``
 outcome (or an outright exception) for one symbol is recorded in
 ``IndexRunResult.diagnostics`` and the run continues, keeping all merged
@@ -46,7 +56,9 @@ caught and turned into a ``"failed"`` result. Because
 the entire new generation, and because collection (ctags/fallback/semantic)
 never touches ``storage`` at all, a failure anywhere in this pipeline always
 leaves the previously indexed generation -- the "last good index" -- fully
-intact, including ``storage.current_head()``.
+intact, including ``storage.current_head()``. This holds equally for a
+``force=True`` run: forcing only skips the persisted-reuse check, never the
+atomicity of the commit itself.
 """
 
 from __future__ import annotations
@@ -68,6 +80,20 @@ IndexRunStatus = Literal["reused", "reindexed", "failed"]
 
 CtagsRunnerCallable = Callable[..., CtagsRunResult]
 FallbackIndexerCallable = Callable[..., FallbackIndexResult]
+
+#: Conservative default cap on how many functions one ``ensure_index()`` run
+#: enriches with the semantic provider, applied whenever a caller does not
+#: pass an explicit ``semantic_symbol_limit``
+#: (:func:`~netstack_academy.indexing.composition.run_indexing_session`, the
+#: real composition root, uses this constant as its own default). Each
+#: enriched symbol costs up to three synchronous provider round trips
+#: (``prepareCallHierarchy``, ``outgoingCalls``, ``references``), so 200
+#: symbols bounds one run to roughly 600 round trips against a live
+#: ``clangd`` session -- a conservative amount of synchronous provider
+#: traffic for a default. Passing ``semantic_symbol_limit=None`` explicitly
+#: remains a supported, opt-in escape hatch for unbounded enrichment (e.g.
+#: a small tree, or a deliberately patient batch run).
+DEFAULT_SEMANTIC_SYMBOL_LIMIT = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,6 +474,22 @@ def _enrich_with_semantic_edges(
     return _merge_edge_batches(edges, semantic_edges)
 
 
+class _Unset:
+    """Sentinel type distinguishing "argument omitted" from "explicit ``None``".
+
+    Used only for ``semantic_symbol_limit`` below: omitting the argument
+    must select :data:`DEFAULT_SEMANTIC_SYMBOL_LIMIT`, while explicitly
+    passing ``None`` must still mean "unbounded" -- a plain ``None``
+    default cannot represent both.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "<unset>"
+
+
+_UNSET_SYMBOL_LIMIT = _Unset()
+
+
 class IndexOrchestrator:
     """Decides when to reindex and drives ctags/fallback/semantic providers."""
 
@@ -459,7 +501,7 @@ class IndexOrchestrator:
         ctags_runner: CtagsRunnerCallable = _default_ctags_runner,
         fallback_indexer: FallbackIndexerCallable = _default_fallback_indexer,
         semantic_provider: SemanticProvider | None = None,
-        semantic_symbol_limit: int | None = None,
+        semantic_symbol_limit: int | None | _Unset = _UNSET_SYMBOL_LIMIT,
     ) -> None:
         self._kernel_repo = Path(kernel_repo)
         self._storage = storage
@@ -467,23 +509,32 @@ class IndexOrchestrator:
         self._fallback_indexer = fallback_indexer
         self._semantic_provider = semantic_provider
         # Each enriched symbol costs up to three synchronous provider round
-        # trips, so the budget is explicit; ``None`` means "no bound", which
-        # is only sensible for a small tree or a fast provider.
-        self._semantic_symbol_limit = semantic_symbol_limit
+        # trips, so the budget is explicit. Omitting the argument selects
+        # the conservative ``DEFAULT_SEMANTIC_SYMBOL_LIMIT``; passing
+        # ``None`` explicitly means "no bound", which is only sensible for
+        # a small tree or a fast provider.
+        self._semantic_symbol_limit = (
+            DEFAULT_SEMANTIC_SYMBOL_LIMIT
+            if semantic_symbol_limit is _UNSET_SYMBOL_LIMIT
+            else semantic_symbol_limit
+        )
         self._closed = False
 
-        # In-memory, per-instance bookkeeping of the last HEAD *this*
-        # instance successfully reindexed. Deliberately not derived from
-        # ``storage.current_head()``: a freshly constructed orchestrator
-        # always re-verifies by running the pipeline at least once, even if
-        # ``storage`` already holds a matching generation from a previous
-        # instance/run, so that a provider regression is caught on the next
-        # call rather than silently masked by a stale on-disk match.
-        self._verified_head: str | None = None
-        self._last_symbol_count = 0
-        self._last_edge_count = 0
+    def ensure_index(self, *, force: bool = False) -> IndexRunResult:
+        """Reindex if needed, or reuse the persisted index at the same ``HEAD``.
 
-    def ensure_index(self) -> IndexRunResult:
+        Unless ``force=True``, reuse is decided by comparing the
+        repository's current ``HEAD`` against ``storage.current_head()`` --
+        the generation already persisted on disk -- rather than any
+        in-memory state private to this instance. A brand new
+        ``IndexOrchestrator`` constructed around the same ``storage`` file
+        therefore reuses just as a repeated call on one long-lived instance
+        does. ``force=True`` skips that comparison and always reruns the
+        full pipeline, e.g. to test a provider failure or to serve a manual
+        "refresh now" request; a failure during a forced run still leaves
+        the previously persisted generation untouched (see this module's
+        docstring).
+        """
         repository_state = inspect_repository(self._kernel_repo)
         if not repository_state.available:
             return IndexRunResult(
@@ -496,12 +547,16 @@ class IndexOrchestrator:
             )
 
         head = repository_state.head
-        if head is not None and head == self._verified_head:
+        if (
+            not force
+            and head is not None
+            and head == self._storage.current_head()
+        ):
             return IndexRunResult(
                 status="reused",
                 head=head,
-                symbol_count=self._last_symbol_count,
-                edge_count=self._last_edge_count,
+                symbol_count=self._storage.symbol_count(),
+                edge_count=self._storage.edge_count(),
                 provider_diagnostics=(),
                 reason=None,
             )
@@ -578,10 +633,6 @@ class IndexOrchestrator:
                 )
 
         replace_result = self._storage.replace_symbols_and_edges(head, symbols, edges)
-
-        self._verified_head = head
-        self._last_symbol_count = replace_result.symbol_count
-        self._last_edge_count = replace_result.edge_count
 
         return IndexRunResult(
             status="reindexed",
