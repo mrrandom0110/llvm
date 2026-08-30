@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from netstack_academy.settings import Settings
 
@@ -61,5 +62,5 @@ def test_settings_rejects_unsupported_editor_scheme(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("EDITOR_SCHEME", "emacs")
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         Settings()
