@@ -55,3 +55,11 @@ def test_settings_explicit_env_overrides_editor_scheme_default(
     monkeypatch.setenv("EDITOR_SCHEME", "vscode")
     settings = Settings()
     assert settings.editor_scheme == "vscode"
+
+
+def test_settings_rejects_unsupported_editor_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EDITOR_SCHEME", "emacs")
+    with pytest.raises(Exception):
+        Settings()

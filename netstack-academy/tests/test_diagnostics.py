@@ -103,3 +103,53 @@ def test_diagnostics_reports_unresolvable_test_symbol_without_deep_link(
     assert payload["test_symbol"]["resolvable"] is False
     assert payload["test_symbol"]["deep_link"] is None
     assert payload["test_symbol"]["reason"] is not None
+
+
+def test_diagnostics_returns_200_with_invalid_test_symbol_line_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repository: Path,
+) -> None:
+    monkeypatch.setenv("KERNEL_REPO", str(git_repository))
+    monkeypatch.setenv(
+        "TEST_SYMBOL_PATH",
+        str(git_repository / "net" / "ipv4" / "tcp_input.c"),
+    )
+    monkeypatch.setenv("TEST_SYMBOL_LINE", "not-a-number")
+    monkeypatch.setenv("TEST_SYMBOL_COLUMN", "1")
+
+    response = TestClient(create_app()).get("/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["configuration"]["valid"] is False
+    assert payload["configuration"]["errors"] == [
+        {"field": "TEST_SYMBOL_LINE", "message": pytest.ANY},
+    ]
+    assert payload["test_symbol"]["resolvable"] is False
+    assert payload["test_symbol"]["deep_link"] is None
+    assert "invalid" in payload["test_symbol"]["reason"].lower()
+
+
+def test_diagnostics_returns_200_with_invalid_test_symbol_column_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repository: Path,
+) -> None:
+    monkeypatch.setenv("KERNEL_REPO", str(git_repository))
+    monkeypatch.setenv(
+        "TEST_SYMBOL_PATH",
+        str(git_repository / "net" / "ipv4" / "tcp_input.c"),
+    )
+    monkeypatch.setenv("TEST_SYMBOL_LINE", "1")
+    monkeypatch.setenv("TEST_SYMBOL_COLUMN", "zero")
+
+    response = TestClient(create_app()).get("/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["configuration"]["valid"] is False
+    assert payload["configuration"]["errors"] == [
+        {"field": "TEST_SYMBOL_COLUMN", "message": pytest.ANY},
+    ]
+    assert payload["test_symbol"]["resolvable"] is False
+    assert payload["test_symbol"]["deep_link"] is None
+    assert "invalid" in payload["test_symbol"]["reason"].lower()
