@@ -270,3 +270,136 @@ pass above. Nothing to fix for this finding.
   (e.g. custom `tokenchars`), the sanitizer's word-splitting and the
   table's own tokenization could diverge, which would not be caught
   without running the tests.
+
+---
+
+## 6. `run_indexing_session` must not eagerly start `clangd` on reuse (final Important finding)
+
+Later commits on this branch (`test: specify durable index reuse`, `fix:
+reuse persisted kernel indexes`) gave `IndexOrchestrator.ensure_index()` a
+real `force` flag and persisted-`HEAD` reuse across fresh orchestrator
+instances, but left one gap unaddressed at the composition root:
+
+File: `src/netstack_academy/indexing/composition.py`
+
+```python
+def run_indexing_session(kernel_repo, storage, *, semantic_provider_factory, ...):
+    repo = Path(kernel_repo)
+    provider = semantic_provider_factory(repo)   # <-- unconditional, eager
+    ...
+    orchestrator = IndexOrchestrator(..., semantic_provider=provider, ...)
+    try:
+        return orchestrator.ensure_index()
+    finally:
+        orchestrator.close()
+```
+
+`semantic_provider_factory` (in production, `create_clangd_provider`) is
+called on **every** invocation, before `IndexOrchestrator` has any chance
+to compare `storage.current_head()` against the repository's `HEAD`. So a
+caller that polls `run_indexing_session` on an unchanged tree still spawns
+and initializes a real `clangd` subprocess (the LSP handshake in
+`StdioLspTransport`/`ClangdAdapter`) every single time, only to have
+`ensure_index()` immediately report `"reused"` and never ask the provider
+for anything.
+
+New file: `tests/indexing/test_lazy_semantic_startup.py` (all tests below
+are new; none existed before this change)
+
+- `test_orchestrator_accepts_a_semantic_provider_factory_and_does_not_call_it_eagerly`
+  — RED (`TypeError`: `IndexOrchestrator.__init__` has no
+  `semantic_provider_factory` parameter today).
+- `test_orchestrator_creates_the_factory_provider_exactly_once_while_reindexing`
+  — RED, same reason. States the target contract: once the parameter
+  exists, one `ensure_index()` call that actually reindexes must call the
+  factory exactly once, with the same `kernel_repo` path passed to the
+  orchestrator.
+- `test_orchestrator_never_calls_provider_factory_when_persisted_head_already_matches`
+  — RED, same reason (fails at construction). States the central claim at
+  the `IndexOrchestrator` level, mirroring
+  `test_ensure_index_reuses_persisted_head_across_new_orchestrator_instance`
+  in `test_orchestrator.py`: a **brand new** orchestrator instance around
+  storage whose persisted `HEAD` already matches must report `"reused"`
+  without ever calling `ctags_runner`, `fallback_indexer`, or the semantic
+  provider factory — enforced here with collector/factory doubles that
+  raise `AssertionError` if invoked at all, not just call-count assertions.
+- `test_orchestrator_rejects_simultaneous_semantic_provider_and_factory` —
+  RED. Passing both `semantic_provider=` and `semantic_provider_factory=`
+  is ambiguous (which one wins is unspecified) and must raise `ValueError`
+  at construction; today it raises `TypeError` instead (unexpected
+  keyword), so the `pytest.raises(ValueError)` block does not catch it and
+  the test fails.
+- `test_orchestrator_still_supports_direct_semantic_provider_injection_without_a_factory`
+  — **green today**, kept as an explicit regression lock: direct
+  `semantic_provider=` injection (the contract exercised throughout
+  `test_semantic_enrichment.py`) must keep working unchanged once
+  `semantic_provider_factory` exists as a sibling constructor argument.
+- `test_run_indexing_session_never_calls_provider_factory_when_index_is_reused`
+  — RED. The composition-root version of the central claim: a second,
+  same-`HEAD` call to `run_indexing_session` must not call
+  `semantic_provider_factory` at all. Verified against current `HEAD` of
+  this branch: the *first* call in this test (no `force`, ordinary
+  kwargs) passes as-is; the *second* call's `semantic_provider_factory`
+  is an `_ExplodingFactory` that raises `AssertionError` the instant it is
+  invoked — and today's `run_indexing_session` invokes it unconditionally
+  at the top of the function, so that `AssertionError` propagates out of
+  the second call uncaught, failing the test.
+- `test_run_indexing_session_exposes_force_to_bypass_persisted_reuse` —
+  RED (`TypeError`: `run_indexing_session` has no `force` parameter
+  today). States that the composition root's own public API must expose
+  the same explicit "refresh now" escape hatch `IndexOrchestrator.
+  ensure_index(force=True)` and `IndexService.force_reindex()` already
+  have, so a caller does not need to reach past `run_indexing_session`
+  into `IndexOrchestrator` directly to force a rerun.
+- `test_run_indexing_session_force_still_lazily_starts_the_provider_exactly_once`
+  — RED, same reason (`force=True` is rejected before the lazy-startup
+  behavior it is meant to exercise is even reached). Combines both claims:
+  even when the persisted `HEAD` already matches (normally a `"reused"`
+  no-factory-call outcome), `force=True` must still route through lazy,
+  exactly-once provider startup and exactly-once close.
+
+Not re-tested here: "closes the provider exactly once on success/failure"
+for `run_indexing_session`. Today's *eager* implementation already
+satisfies this (`test_composition_closes_the_provider_after_enrichment`
+and `test_composition_closes_the_provider_when_reindexing_fails` in
+`test_semantic_enrichment.py`, both green today), and making provider
+creation lazy does not change the close-once contract on the code path
+that already runs the pipeline to completion — so a duplicate assertion
+here would not be RED. This is analogous to finding 5's "already
+satisfied" schema-index tests above: mentioned for completeness rather
+than presented as new gap coverage.
+
+### Design captured by these tests (not yet implemented)
+
+- `IndexOrchestrator.__init__` gains an optional `semantic_provider_factory:
+  Callable[[Path], SemanticProvider] | None = None` parameter, alongside
+  the existing `semantic_provider: SemanticProvider | None = None`.
+  Passing both raises `ValueError`.
+- The factory is **not** called in `__init__`. It is called exactly once,
+  lazily, from inside `_reindex` (i.e. strictly after `ensure_index`'s
+  persisted-`HEAD` reuse check has already decided a real reindex is
+  happening), with `self._kernel_repo` as its argument, and the result is
+  stored on `self._semantic_provider` so the existing `close()` method
+  (unchanged) tears it down exactly like a directly injected provider.
+- `run_indexing_session` stops calling `semantic_provider_factory` itself
+  and instead forwards it straight to `IndexOrchestrator(...,
+  semantic_provider_factory=semantic_provider_factory, ...)`. It gains a
+  `force: bool = False` parameter forwarded verbatim to
+  `orchestrator.ensure_index(force=force)`. The existing `try`/`finally`
+  around `orchestrator.close()` is unchanged, so the close-once guarantee
+  on both the success and failure paths is preserved automatically once
+  `IndexOrchestrator` owns the lazily-created provider.
+
+### Verification status
+
+Per instruction for this change, **no test file was modified and the test
+suite was not run**; production code under `src/` was not touched either.
+RED status above was established by reading `run_indexing_session`'s and
+`IndexOrchestrator.__init__`'s current source directly against each new
+test's exact calls and assertions (as this report also did for the fix
+sections above), not by executing pytest. Running
+`python3 -m pytest tests/indexing/test_lazy_semantic_startup.py -q`
+against the current, unmodified `src/` is the recommended next step to
+confirm all RED tests above fail as described and no previously-green
+test in the suite is affected (this is a new file; nothing existing was
+edited).
