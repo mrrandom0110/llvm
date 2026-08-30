@@ -788,3 +788,109 @@ def test_composition_closes_the_provider_when_reindexing_fails(
     assert result.status == "failed"
     assert provider.close_calls == 1
     assert storage.current_head() is None
+
+
+# -- default semantic symbol budget ------------------------------------------
+#
+# ``IndexOrchestrator`` itself keeps ``semantic_symbol_limit: int | None =
+# None`` (unbounded) as its own constructor default -- every orchestrator
+# test above passes an explicit, small limit precisely because unbounded is
+# the wrong default for a real run. ``run_indexing_session`` is the
+# composition root real callers (and, eventually, an HTTP layer) actually
+# go through, so *it* is where an unbounded default is a footgun: omitting
+# ``semantic_symbol_limit`` should not silently mean "enrich every function
+# in the kernel tree, one synchronous clangd round trip at a time". These
+# tests pin a finite, documented, conservative default there, while
+# preserving ``None`` as an explicit, opt-in escape hatch for unbounded
+# enrichment (e.g. a small tree, or a deliberately patient batch run).
+
+
+class _RecordingOrchestrator:
+    """Stands in for :class:`IndexOrchestrator` to capture the
+    ``semantic_symbol_limit`` composition wires it up with, without needing
+    to actually run enrichment against hundreds of synthetic symbols to
+    observe where a numeric default truncates.
+    """
+
+    last_kwargs: dict[str, object] | None = None
+
+    def __init__(self, kernel_repo: Path, storage: IndexStorage, **kwargs: object) -> None:
+        type(self).last_kwargs = kwargs
+
+    def ensure_index(self):
+        from netstack_academy.indexing.orchestrator import IndexRunResult
+
+        return IndexRunResult(
+            status="reindexed", head="deadbeef", symbol_count=0, edge_count=0
+        )
+
+    def close(self) -> None:
+        pass
+
+
+def test_default_semantic_symbol_limit_is_a_conservative_positive_constant() -> None:
+    """The finding requires a *finite*, *documented*, *exact* default: pin
+    the concrete value here so a future change to it is a deliberate,
+    reviewed edit to this test rather than a silent drift. 200 symbols, at
+    up to three synchronous provider round trips each (per
+    ``IndexOrchestrator``'s own enrichment budget documentation), is a
+    conservative bound for one ``ensure_index()`` call against a live
+    ``clangd`` session.
+    """
+    from netstack_academy.indexing.composition import DEFAULT_SEMANTIC_SYMBOL_LIMIT
+
+    assert DEFAULT_SEMANTIC_SYMBOL_LIMIT == 200
+    assert isinstance(DEFAULT_SEMANTIC_SYMBOL_LIMIT, int)
+    assert DEFAULT_SEMANTIC_SYMBOL_LIMIT > 0
+
+
+def test_run_indexing_session_defaults_to_the_finite_symbol_budget_when_omitted(
+    monkeypatch: pytest.MonkeyPatch, semantic_repo: Path, storage: IndexStorage
+) -> None:
+    """Omitting ``semantic_symbol_limit`` entirely must not mean unbounded:
+    it must mean the documented finite default.
+    """
+    from netstack_academy.indexing import composition
+
+    monkeypatch.setattr(composition, "IndexOrchestrator", _RecordingOrchestrator)
+    _RecordingOrchestrator.last_kwargs = None
+
+    composition.run_indexing_session(
+        semantic_repo,
+        storage,
+        semantic_provider_factory=lambda kernel_repo: object(),
+        ctags_runner=_stub_ctags(TCP_PROCESS_DEFINITION),
+        fallback_indexer=index_fallback,
+    )
+
+    assert _RecordingOrchestrator.last_kwargs is not None
+    assert (
+        _RecordingOrchestrator.last_kwargs["semantic_symbol_limit"]
+        == composition.DEFAULT_SEMANTIC_SYMBOL_LIMIT
+    )
+
+
+def test_run_indexing_session_still_honors_explicit_none_as_unbounded(
+    monkeypatch: pytest.MonkeyPatch, semantic_repo: Path, storage: IndexStorage
+) -> None:
+    """``None`` remains a valid, explicit opt-in for unbounded enrichment --
+    distinct from simply omitting the argument -- so a caller that has
+    deliberately chosen "no bound" is not silently capped by the new
+    default.
+    """
+    from netstack_academy.indexing import composition
+
+    monkeypatch.setattr(composition, "IndexOrchestrator", _RecordingOrchestrator)
+    _RecordingOrchestrator.last_kwargs = None
+
+    composition.run_indexing_session(
+        semantic_repo,
+        storage,
+        semantic_provider_factory=lambda kernel_repo: object(),
+        ctags_runner=_stub_ctags(TCP_PROCESS_DEFINITION),
+        fallback_indexer=index_fallback,
+        semantic_symbol_limit=None,
+    )
+
+    assert _RecordingOrchestrator.last_kwargs is not None
+    assert _RecordingOrchestrator.last_kwargs["semantic_symbol_limit"] is None

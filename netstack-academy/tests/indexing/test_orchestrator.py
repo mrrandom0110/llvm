@@ -171,9 +171,22 @@ def test_ensure_index_reports_failure_for_unavailable_repository(
     storage.close()
 
 
-def test_ensure_index_leaves_last_good_index_intact_when_reindexing_raises(
+def test_force_reindex_leaves_last_good_index_intact_when_reindexing_raises(
     tmp_path: Path, two_commit_git_repo: tuple[Path, str, str]
 ) -> None:
+    """Exercising a provider failure from a *second*, freshly constructed
+    orchestrator requires an explicit ``force=True``: with persisted
+    same-HEAD reuse in place, a plain ``ensure_index()`` on
+    ``broken_orchestrator`` would just reuse ``storage.current_head()``
+    (which already matches ``first_head``) and never call the broken
+    ``fallback_indexer`` at all -- so this test's own premise (a *second*
+    run that actually re-executes the pipeline and fails) depends on
+    requesting a forced rerun. This replaces the old, unqualified
+    ``ensure_index()`` call, whose passing depended on the now-fixed
+    contract bug where every freshly constructed orchestrator instance
+    unconditionally re-ran the pipeline regardless of ``storage``'s
+    persisted head.
+    """
     repo, first_head, second_head = two_commit_git_repo
     storage = IndexStorage.open(tmp_path / "index.sqlite3")
 
@@ -201,10 +214,90 @@ def test_ensure_index_leaves_last_good_index_intact_when_reindexing_raises(
         semantic_provider=_StubSemanticProvider(),
     )
 
-    second_result = broken_orchestrator.ensure_index()
+    second_result = broken_orchestrator.ensure_index(force=True)
 
     assert second_result.status == "failed"
     assert storage.current_head() == first_head
+    storage.close()
+
+
+def test_ensure_index_reuses_persisted_head_across_new_orchestrator_instance(
+    tmp_path: Path, git_repository: Path
+) -> None:
+    """Persisted same-HEAD reuse must survive a new orchestrator/session,
+    not just repeated calls on one long-lived object: reopening ``storage``
+    from the same on-disk file and constructing a brand new
+    ``IndexOrchestrator`` around it (with brand new collector stubs, so a
+    fresh instance's own -- previously in-memory-only -- bookkeeping cannot
+    be the reason for a match) must still report ``"reused"`` and invoke
+    neither collector, exactly as calling ``ensure_index()`` twice on the
+    original instance already does.
+    """
+    db_path = tmp_path / "index.sqlite3"
+    storage = IndexStorage.open(db_path)
+    first_ctags = _StubCtagsRunner(_empty_ctags_result())
+    first_fallback = _StubFallbackIndexer(_empty_fallback_result())
+    first_orchestrator = IndexOrchestrator(
+        git_repository,
+        storage,
+        ctags_runner=first_ctags,
+        fallback_indexer=first_fallback,
+        semantic_provider=_StubSemanticProvider(),
+    )
+
+    first_result = first_orchestrator.ensure_index()
+    assert first_result.status == "reindexed"
+    storage.close()
+
+    reopened_storage = IndexStorage.open(db_path)
+    second_ctags = _StubCtagsRunner(_empty_ctags_result())
+    second_fallback = _StubFallbackIndexer(_empty_fallback_result())
+    second_orchestrator = IndexOrchestrator(
+        git_repository,
+        reopened_storage,
+        ctags_runner=second_ctags,
+        fallback_indexer=second_fallback,
+        semantic_provider=_StubSemanticProvider(),
+    )
+
+    second_result = second_orchestrator.ensure_index()
+
+    assert second_result.status == "reused"
+    assert second_result.head == first_result.head
+    assert second_ctags.call_count == 0
+    assert second_fallback.call_count == 0
+    reopened_storage.close()
+
+
+def test_force_reindex_reruns_pipeline_even_when_persisted_head_matches(
+    tmp_path: Path, git_repository: Path
+) -> None:
+    """``force=True`` is the explicit escape hatch for testing provider
+    failures or a manual refresh: it must rerun the full collection
+    pipeline even though ``storage.current_head()`` already matches the
+    repository's ``HEAD`` and a plain ``ensure_index()`` would reuse.
+    """
+    storage = IndexStorage.open(tmp_path / "index.sqlite3")
+    ctags = _StubCtagsRunner(_empty_ctags_result())
+    fallback = _StubFallbackIndexer(_empty_fallback_result())
+    orchestrator = IndexOrchestrator(
+        git_repository,
+        storage,
+        ctags_runner=ctags,
+        fallback_indexer=fallback,
+        semantic_provider=_StubSemanticProvider(),
+    )
+
+    first_result = orchestrator.ensure_index()
+    assert first_result.status == "reindexed"
+    assert ctags.call_count == 1
+    assert fallback.call_count == 1
+
+    second_result = orchestrator.ensure_index(force=True)
+
+    assert second_result.status == "reindexed"
+    assert ctags.call_count == 2
+    assert fallback.call_count == 2
     storage.close()
 
 
