@@ -22,7 +22,7 @@ def test_prepare_call_hierarchy_sends_zero_indexed_position(
 ) -> None:
     transport = FakeLspTransport()
     adapter = ClangdAdapter(transport, kernel_repo=git_repository)
-    transport.script_response(result=[])
+    transport.queue_response("textDocument/prepareCallHierarchy", result=[])
 
     adapter.prepare_call_hierarchy("net/ipv4/tcp_input.c", line=42, column=5)
 
@@ -38,7 +38,8 @@ def test_prepare_call_hierarchy_maps_response_uri_to_relative_path(
     target = (git_repository / "net" / "ipv4" / "tcp_input.c").resolve()
     transport = FakeLspTransport()
     adapter = ClangdAdapter(transport, kernel_repo=git_repository)
-    transport.script_response(
+    transport.queue_response(
+        "textDocument/prepareCallHierarchy",
         result=[
             {
                 "name": "tcp_input",
@@ -70,7 +71,8 @@ def test_outgoing_calls_maps_response_to_relative_locations(
     target = (git_repository / "net" / "ipv4" / "tcp_input.c").resolve()
     transport = FakeLspTransport()
     adapter = ClangdAdapter(transport, kernel_repo=git_repository)
-    transport.script_response(
+    transport.queue_response(
+        "callHierarchy/outgoingCalls",
         result=[
             {
                 "to": {
@@ -111,7 +113,7 @@ def test_outgoing_calls_sends_call_hierarchy_item_verbatim(
 ) -> None:
     transport = FakeLspTransport()
     adapter = ClangdAdapter(transport, kernel_repo=git_repository)
-    transport.script_response(result=[])
+    transport.queue_response("callHierarchy/outgoingCalls", result=[])
     item = CallHierarchyItem(
         name="tcp_input", relative_path="net/ipv4/tcp_input.c", line=42, column=5
     )
@@ -128,7 +130,8 @@ def test_references_maps_response_locations_to_relative_paths(
     target = (git_repository / "net" / "ipv4" / "tcp_input.c").resolve()
     transport = FakeLspTransport()
     adapter = ClangdAdapter(transport, kernel_repo=git_repository)
-    transport.script_response(
+    transport.queue_response(
+        "textDocument/references",
         result=[
             {
                 "uri": f"file://{target.as_posix()}",
@@ -154,7 +157,7 @@ def test_references_request_uses_one_indexed_to_zero_indexed_conversion(
 ) -> None:
     transport = FakeLspTransport()
     adapter = ClangdAdapter(transport, kernel_repo=git_repository)
-    transport.script_response(result=[])
+    transport.queue_response("textDocument/references", result=[])
 
     adapter.references("net/ipv4/tcp_input.c", line=1, column=1)
 
@@ -182,7 +185,10 @@ def test_prepare_call_hierarchy_degrades_gracefully_on_jsonrpc_error_response(
 ) -> None:
     transport = FakeLspTransport()
     adapter = ClangdAdapter(transport, kernel_repo=git_repository)
-    transport.script_response(error={"code": -32601, "message": "method not found"})
+    transport.queue_response(
+        "textDocument/prepareCallHierarchy",
+        error={"code": -32601, "message": "method not found"},
+    )
 
     outcome = adapter.prepare_call_hierarchy("net/ipv4/tcp_input.c", line=1, column=1)
 
@@ -213,7 +219,7 @@ def test_adapter_never_requires_a_real_clangd_process(
     """
     transport = FakeLspTransport()
     adapter = ClangdAdapter(transport, kernel_repo=git_repository)
-    transport.script_response(result=[])
+    transport.queue_response("textDocument/prepareCallHierarchy", result=[])
 
     outcome = adapter.prepare_call_hierarchy("net/ipv4/tcp_input.c", line=1, column=1)
 
