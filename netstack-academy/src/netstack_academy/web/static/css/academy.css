@@ -1,0 +1,397 @@
+/*
+ * Everything is served from this file: no CDN, no webfont host, no analytics,
+ * no @import. A kernel reading session on a laptop with no network renders
+ * exactly the same page as one with it.
+ *
+ * There is no build step, which is a constraint rather than an omission: a
+ * learning tool that needs a toolchain before it renders a lesson is a tool
+ * that stops working the week its toolchain moves on.
+ *
+ * State is styled from the same data attributes the page uses to *say* that
+ * state -- data-locked, data-provenance, data-confidence, data-status. A
+ * reader who cannot see colour still gets the label; the colour is a second
+ * channel, never the only one.
+ */
+
+:root {
+  --ink: #16181d;
+  --paper: #fbfbfd;
+  --card: #ffffff;
+  --muted: #5c6270;
+  --rule: #d7dae2;
+  --accent: #1d4ed8;
+  --locked: #8a8f9c;
+  --warn: #8a5300;
+  --danger: #b42318;
+  --measure: 52rem;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 1rem 4rem;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.6;
+}
+
+main {
+  max-width: var(--measure);
+  margin: 0 auto;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.25;
+}
+
+/* ------------------------------------------------------------------ */
+/* Shell                                                              */
+/* ------------------------------------------------------------------ */
+
+/* Off-screen until focused, which is the whole point of a skip link. */
+.skip-link {
+  position: absolute;
+  left: -100vw;
+}
+
+.skip-link:focus {
+  position: static;
+  display: inline-block;
+  padding: 0.5rem;
+}
+
+/* For labels that a screen reader needs and a sighted reader gets from
+   context. Never `display: none`, which would hide it from both. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.site-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  align-items: baseline;
+  justify-content: space-between;
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.site-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.search-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.search-form input {
+  min-width: 12rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font: inherit;
+}
+
+a {
+  color: var(--accent);
+}
+
+code,
+pre {
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+}
+
+pre {
+  overflow-x: auto;
+  padding: 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--card);
+}
+
+table {
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--rule);
+  text-align: left;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.card {
+  margin: 1.25rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+button {
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--card);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+textarea {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font: inherit;
+}
+
+.tag {
+  padding: 0 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Navigation and listings                                            */
+/* ------------------------------------------------------------------ */
+
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+}
+
+.crumbs li + li::before {
+  content: "/ ";
+  color: var(--rule);
+}
+
+.module-map,
+.lesson-list,
+.results,
+.edges,
+.candidates {
+  padding-left: 1.25rem;
+}
+
+.lesson-row {
+  margin: 0.25rem 0;
+}
+
+/* The lock is advice, not a gate: the row is dimmed, and the page still
+   says "locked" in words next to it. */
+[data-locked="true"] > a {
+  color: var(--locked);
+}
+
+[data-status="draft"] > a {
+  font-style: italic;
+}
+
+[data-progress-status="completed"] > a {
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/* Progress                                                           */
+/* ------------------------------------------------------------------ */
+
+/* A real <progress> element, so its width comes from its value and no page
+   needs a style attribute -- which is what would force 'unsafe-inline' into
+   style-src. */
+.progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.progress-bar {
+  width: 12rem;
+  height: 0.75rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Symbol graph                                                       */
+/* ------------------------------------------------------------------ */
+
+/* Drawn by the script into an aria-hidden container; the list beside it is
+   the form that is read aloud, so this half is decoration and is allowed to
+   be absent. */
+[data-symbol-graph] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-start;
+  margin: 0.75rem 0;
+}
+
+[data-symbol-graph]:empty {
+  display: none;
+}
+
+.graph-column {
+  flex: 1 1 12rem;
+  min-width: 10rem;
+  padding: 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.graph-column h4 {
+  margin: 0 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.85em;
+  text-transform: uppercase;
+}
+
+.graph-node {
+  margin: 0.2rem 0;
+  padding: 0.2rem 0.4rem;
+  border-left: 3px solid var(--rule);
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.9em;
+}
+
+.graph-node[data-confidence="high"] {
+  border-left-color: var(--accent);
+}
+
+.graph-node[data-confidence="low"] {
+  border-left-color: var(--warn);
+}
+
+/* Provenance is the difference between "clangd knows where this call is" and
+   "a regex saw the name", so the two never look the same. */
+[data-provenance="semantic"] {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.5rem;
+}
+
+[data-provenance="heuristic"] {
+  border-left: 3px dashed var(--warn);
+  padding-left: 0.5rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Index status                                                       */
+/* ------------------------------------------------------------------ */
+
+[data-index-stale="true"] {
+  border-left: 4px solid var(--warn);
+}
+
+[data-index-ensured="false"] dt {
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* Failed requests                                                    */
+/* ------------------------------------------------------------------ */
+
+/* A learning tool that silently swallows a failed save loses notes, so the
+   message has to be visible where the action was. Empty, it takes no space
+   and announces nothing. */
+.api-error {
+  display: block;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  color: var(--danger);
+  background: var(--card);
+}
+
+.api-error:empty {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Keyboard and motion                                                */
+/* ------------------------------------------------------------------ */
+
+/* Kernel reading is link-heavy: losing the focus ring makes the whole
+   application unusable without a mouse, and the default ring is easy to lose
+   against a light background. */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 48rem) {
+  body {
+    padding: 0 0.75rem 3rem;
+  }
+
+  .site-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .progress-bar {
+    width: 100%;
+  }
+
+  ol,
+  ul {
+    padding-left: 1.1rem;
+  }
+}
+
+@media (min-width: 64rem) {
+  :root {
+    --measure: 58rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

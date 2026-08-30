@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netstack-academy"
+version = "0.1.0"
+description = "Local Linux network-stack learning academy"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "jinja2>=3.1.0",
+    "markdown-it-py>=3.0.0",
+    "nh3>=0.2.0",
+    "pydantic-settings>=2.6.0",
+    "python-frontmatter>=1.1.0",
+    "pyyaml>=6.0",
+    "uvicorn[standard]>=0.32.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "httpx2>=2.0.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-timeout>=2.3.0",
+]
+
+[project.scripts]
+netstack-academy = "netstack_academy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# The packaged course, the templates and the local CSS/JS are all runtime
+# data: an installed wheel that omits them has nothing to serve.
+netstack_academy = [
+    "content/**/*.md",
+    "web/templates/**/*.html",
+    "web/static/**/*.css",
+    "web/static/**/*.js",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+timeout = 30

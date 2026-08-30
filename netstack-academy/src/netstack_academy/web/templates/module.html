@@ -1,0 +1,32 @@
+{#
+  A small page that carries a lot of the course's navigability: without it,
+  moving between lessons means going back to the dashboard or using search.
+  So its ordering and its breadcrumbs matter as much as the dashboard's.
+#}
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+
+{% block title %}{{ module.title }} - netstack academy{% endblock %}
+
+{% block main %}
+  {{ ui.breadcrumbs(crumbs) }}
+
+  <h1>{{ module.title }}</h1>
+  <p>{{ module.summary }}</p>
+
+  {{ ui.progress_bar(
+      module.percent_complete,
+      module.completed_count,
+      module.lesson_count,
+      module.title ~ ' progress',
+  ) }}
+
+  <section aria-labelledby="lessons-heading">
+    <h2 id="lessons-heading">Lessons</h2>
+    <ol class="lesson-list">
+      {% for lesson in module.lessons %}
+        {{ ui.lesson_row(lesson) }}
+      {% endfor %}
+    </ol>
+  </section>
+{% endblock %}

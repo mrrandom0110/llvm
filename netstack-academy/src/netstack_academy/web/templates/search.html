@@ -1,0 +1,84 @@
+{#
+  One box, two kinds of answer.
+
+  "napi_poll" is both a phrase in a lesson and a function in the kernel, and
+  a reader who types it wants whichever of those they were thinking of. Both
+  are returned, kept apart, rather than interleaved by a relevance score this
+  program has no way to compute: there is no defensible way to rank "this
+  lesson mentions it" against "this is where it is defined".
+
+  The query is the most obvious injection surface in the application -- it is
+  echoed back onto the page, it reaches an FTS5 MATCH expression, and it is
+  entirely attacker-controlled the moment a learner pastes a link. It arrives
+  here as `query_text`, already escaped by
+  `netstack_academy.web.escaping.untrusted_text`, and the unescaped string is
+  deliberately not passed to this template at all.
+#}
+{% extends "base.html" %}
+
+{% block title %}Search - netstack academy{% endblock %}
+
+{% block main %}
+  <h1>Search</h1>
+
+  {% if not has_query %}
+    <p>
+      Type a phrase from a lesson or the name of a kernel symbol. The course
+      and the index are searched together.
+    </p>
+  {% else %}
+    <p>
+      Results for <strong>{{ query_text }}</strong>.
+    </p>
+
+    <section
+      data-lesson-results="{{ lessons | length }}"
+      aria-labelledby="lesson-results-heading"
+    >
+      <h2 id="lesson-results-heading">Lessons ({{ lessons | length }})</h2>
+      {% if lessons %}
+        <ul class="results">
+          {% for hit in lessons %}
+            <li>
+              <a href="{{ hit.url }}">{{ hit.title }}</a>
+              <span class="muted">in {{ hit.module_title }}</span>
+              {% if hit.status != 'published' %}
+                <span class="tag">{{ hit.status }}</span>
+              {% endif %}
+              <p>{{ hit.summary }}</p>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>No matches in the course.</p>
+      {% endif %}
+    </section>
+
+    <section
+      data-symbol-results="{{ symbols | length }}"
+      aria-labelledby="symbol-results-heading"
+    >
+      <h2 id="symbol-results-heading">Symbols ({{ symbols | length }})</h2>
+      {% if symbols %}
+        <ul class="results">
+          {% for symbol in symbols %}
+            <li>
+              <a href="{{ symbol.url }}"><code>{{ symbol.name }}</code></a>
+              <span class="muted">
+                {{ symbol.kind }} in {{ symbol.relative_path | repo_path }}:{{ symbol.line }}
+              </span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% elif symbols_unavailable_reason %}
+        <p>No matches: {{ symbols_unavailable_reason }}</p>
+      {% else %}
+        <p>No matches in the kernel index.</p>
+      {% endif %}
+    </section>
+
+    {% if not lessons and not symbols %}
+      <p>Nothing matched. Try a shorter phrase or a bare symbol name.</p>
+    {% endif %}
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,101 @@
+{#
+  Fragments shared by more than one page.
+
+  `progress_bar` uses a real <progress> element rather than a styled <div>.
+  A div would need its width set from a percentage the server computed, and
+  the only way to do that in markup is a style attribute -- which would force
+  'unsafe-inline' into style-src and hollow out the policy for the sake of a
+  coloured bar. <progress> is styled entirely from the stylesheet. The
+  explicit aria-value* attributes duplicate what the element's own `value`
+  and `max` already say; they are there because that mapping is not
+  universally implemented, and a progress bar that announces nothing is worse
+  than a redundant attribute.
+#}
+
+{% macro breadcrumbs(crumbs) %}
+  <nav aria-label="Breadcrumb">
+    <ol class="crumbs">
+      {% for crumb in crumbs %}
+        <li>
+          {% if crumb.url %}
+            <a href="{{ crumb.url }}">{{ crumb.label }}</a>
+          {% else %}
+            <span aria-current="page">{{ crumb.label }}</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ol>
+  </nav>
+{% endmacro %}
+
+{% macro progress_bar(percent, completed, total, label, scope='module') %}
+  <p class="progress">
+    <progress
+      class="progress-bar"
+      data-progress="{{ scope }}"
+      max="100"
+      value="{{ percent }}"
+      role="progressbar"
+      aria-label="{{ label }}"
+      aria-valuenow="{{ percent }}"
+      aria-valuemin="0"
+      aria-valuemax="100"
+    ></progress>
+    <span>{{ completed }} of {{ total }} lessons complete ({{ percent }}%)</span>
+  </p>
+{% endmacro %}
+
+{#
+  One row in a lesson listing. Every state a reader needs is an attribute
+  rather than a colour: progress, publication status and the prerequisite
+  lock are all things the page has to say out loud, and the stylesheet reads
+  the same attributes the script does.
+#}
+{% macro lesson_row(lesson) %}
+  <li
+    class="lesson-row"
+    data-lesson="{{ lesson.slug }}"
+    data-status="{{ lesson.status }}"
+    data-progress-status="{{ lesson.progress_status }}"
+    data-locked="{{ 'true' if not lesson.is_unlocked else 'false' }}"
+  >
+    <a href="/lessons/{{ lesson.slug }}">{{ lesson.title }}</a>
+    {% if lesson.status != 'published' %}
+      <span class="tag">{{ lesson.status }}</span>
+    {% endif %}
+    {% if not lesson.is_unlocked %}
+      <span class="tag">locked</span>
+    {% endif %}
+    {% if lesson.progress_status != 'not_started' %}
+      <span class="tag">{{ lesson.progress_status.replace('_', ' ') }}</span>
+    {% endif %}
+    {% if lesson.review_due %}
+      <span class="tag">review due</span>
+    {% endif %}
+  </li>
+{% endmacro %}
+
+{#
+  The note editor. `note_text` arrives pre-escaped from
+  `netstack_academy.web.escaping`, which is why it is rendered without a
+  filter here: a second escape would show the learner entities instead of
+  the angle brackets they typed.
+
+  The <form> is a real form with a real action so the markup describes what
+  the script does; the script intercepts the submit and sends JSON, because
+  a form post cannot express a PUT and mutations here are JSON-only.
+#}
+{% macro note_form(action, note_text, label) %}
+  <section class="card" aria-labelledby="note-heading">
+    <h2 id="note-heading">Your note</h2>
+    <form data-note-form action="{{ action }}" method="post">
+      <label class="visually-hidden" for="note-body">{{ label }}</label>
+      <textarea id="note-body" name="body" rows="4">{{ note_text }}</textarea>
+      <p class="actions">
+        <button type="submit">Save note</button>
+        <span class="muted" data-note-saved></span>
+        <span class="api-error" data-error role="alert"></span>
+      </p>
+    </form>
+  </section>
+{% endmacro %}

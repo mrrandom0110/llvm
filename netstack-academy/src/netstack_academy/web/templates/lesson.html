@@ -1,0 +1,342 @@
+{#
+  The page the whole program exists to render.
+
+  Two rules are absolute here, and both are structural rather than a matter
+  of care.
+
+  The answer key is not on this page -- not in a hidden input, not in a data
+  attribute, not in a comment. That is not enforced by remembering to leave
+  it out: `lesson.quiz` is a tuple of `PublicQuizQuestion`, a type with no
+  `answer` and no `explanation` field at all, so there is nothing here to
+  leak. Grading happens server-side against the loaded lesson, and the graded
+  response is the only thing that ever carries an explanation.
+
+  And reading works without JavaScript. The body, objectives, kernel context,
+  structures, caveats, tracepoints, symbols and lab below are all rendered by
+  the server. The script adds saving progress, saving a note, submitting the
+  quiz and recording a review; it is not what makes the lesson legible.
+
+  `lesson.body_html` is emitted with `| safe` because it is the one value on
+  any page that is already HTML: the loader sanitizes it once, at load time,
+  which is why the authored `<script>`, `javascript:` link and `onerror`
+  attribute in the fixture content are gone from the model before a template
+  ever sees it. Sanitizing here instead would mean doing it on every request
+  and trusting whichever template remembered to.
+#}
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+
+{% block title %}{{ lesson.title }} - netstack academy{% endblock %}
+
+{% block main %}
+  {{ ui.breadcrumbs(crumbs) }}
+
+  <article
+    data-lesson-id="{{ lesson.id }}"
+    data-lesson-slug="{{ lesson.slug }}"
+    data-status="{{ lesson.status }}"
+    data-locked="{{ 'true' if not lesson.is_unlocked else 'false' }}"
+    data-progress-status="{{ lesson.progress_status }}"
+  >
+    <h1>{{ lesson.title }}</h1>
+    <p>{{ lesson.summary }}</p>
+
+    {% if lesson.status != 'published' %}
+      <p class="tag">
+        This lesson is a {{ lesson.status }}: it is not finished yet.
+      </p>
+    {% endif %}
+
+    {% if not lesson.is_unlocked %}
+      <section class="card" data-prerequisites aria-labelledby="locked-heading">
+        <h2 id="locked-heading">You are skipping ahead</h2>
+        <p>
+          This lesson assumes the ones below. Reading it now is allowed -- the
+          lock is advice, not a gate -- but it will make more sense afterwards.
+        </p>
+        <ul>
+          {% for prerequisite in lesson.prerequisites %}
+            <li>
+              <a href="/lessons/{{ prerequisite.slug }}">{{ prerequisite.title }}</a>
+              <span class="muted">
+                {{ 'complete' if prerequisite.completed else 'not complete' }}
+              </span>
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% elif lesson.prerequisites %}
+      <section data-prerequisites aria-labelledby="prerequisites-heading">
+        <h2 id="prerequisites-heading">Builds on</h2>
+        <ul>
+          {% for prerequisite in lesson.prerequisites %}
+            <li>
+              <a href="/lessons/{{ prerequisite.slug }}">{{ prerequisite.title }}</a>
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endif %}
+
+    <section class="card" aria-labelledby="progress-heading">
+      <h2 id="progress-heading">Your progress</h2>
+      <p>Status: {{ lesson.progress_status.replace('_', ' ') }}</p>
+      <p class="actions">
+        <button
+          type="button"
+          data-progress-action="start"
+          data-progress-url="/api/lessons/{{ lesson.slug }}/progress"
+        >
+          Mark as started
+        </button>
+        <button
+          type="button"
+          data-progress-action="complete"
+          data-progress-url="/api/lessons/{{ lesson.slug }}/progress"
+        >
+          Mark as complete
+        </button>
+      </p>
+    </section>
+
+    {% if lesson.objectives %}
+      <section data-objectives aria-labelledby="objectives-heading">
+        <h2 id="objectives-heading">What you will be able to explain</h2>
+        <ul>
+          {% for objective in lesson.objectives %}
+            <li>{{ objective }}</li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endif %}
+
+    {% if has_kernel_context %}
+      <section data-kernel-context aria-labelledby="context-heading">
+        <h2 id="context-heading">Where in the kernel this happens</h2>
+        <dl>
+          {% if lesson.packet_stage %}
+            <dt>Packet stage</dt><dd>{{ lesson.packet_stage }}</dd>
+          {% endif %}
+          {% if lesson.execution_context %}
+            <dt>Execution context</dt><dd>{{ lesson.execution_context }}</dd>
+          {% endif %}
+          {% if lesson.ownership %}
+            <dt>Ownership</dt><dd>{{ lesson.ownership }}</dd>
+          {% endif %}
+          {% if lesson.locking %}
+            <dt>Locking</dt><dd>{{ lesson.locking }}</dd>
+          {% endif %}
+          {% if lesson.rcu %}
+            <dt>RCU</dt><dd>{{ lesson.rcu }}</dd>
+          {% endif %}
+        </dl>
+      </section>
+    {% endif %}
+
+    {% if lesson.structures %}
+      <section data-structures aria-labelledby="structures-heading">
+        <h2 id="structures-heading">Structures that matter</h2>
+        <ul>
+          {% for structure in lesson.structures %}
+            <li>
+              <code>{{ structure.name }}</code>
+              {% if structure.fields %}
+                &mdash;
+                {% for field in structure.fields %}
+                  <code>{{ field }}</code>{% if not loop.last %}, {% endif %}
+                {% endfor %}
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endif %}
+
+    {% if has_caveats %}
+      <section data-caveats aria-labelledby="caveats-heading">
+        <h2 id="caveats-heading">What changes the answer</h2>
+        {% if lesson.config_caveats %}
+          <h3>Kernel configuration</h3>
+          <ul>
+            {% for caveat in lesson.config_caveats %}
+              <li>{{ caveat }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {% if lesson.version_caveats %}
+          <h3>Kernel version</h3>
+          <ul>
+            {% for caveat in lesson.version_caveats %}
+              <li>{{ caveat }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </section>
+    {% endif %}
+
+    {% if lesson.tracepoints %}
+      <section data-tracepoints aria-labelledby="tracepoints-heading">
+        <h2 id="tracepoints-heading">How to watch it happen</h2>
+        <ul>
+          {% for tracepoint in lesson.tracepoints %}
+            <li><code>{{ tracepoint }}</code></li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endif %}
+
+    <section data-lesson-body aria-labelledby="body-heading">
+      <h2 id="body-heading">The lesson</h2>
+      {{ lesson.body_html | safe }}
+    </section>
+
+    {% if source_symbols %}
+      <section data-source-symbols aria-labelledby="symbols-heading">
+        <h2 id="symbols-heading">Read the source</h2>
+        <ul>
+          {% for reference in source_symbols %}
+            <li>
+              <a href="{{ reference.url }}"><code>{{ reference.name }}</code></a>
+              {% if reference.path %}
+                <span class="muted">in {{ reference.path }}</span>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endif %}
+
+    {% if lesson.lab %}
+      {#
+        Lab commands are *shown*, inside <code>, and nothing on the server
+        runs them. A course full of shell is content: the fixture content
+        deliberately includes a command that would create a file, and it must
+        never appear.
+      #}
+      <section data-lab aria-labelledby="lab-heading">
+        <h2 id="lab-heading">Try it on a running kernel</h2>
+        {% if lesson.lab.commands %}
+          <h3>Run</h3>
+          <ol>
+            {% for command in lesson.lab.commands %}
+              <li><code>{{ command }}</code></li>
+            {% endfor %}
+          </ol>
+        {% endif %}
+        {% if lesson.lab.expected_observations %}
+          <h3>You should see</h3>
+          <ul>
+            {% for observation in lesson.lab.expected_observations %}
+              <li>{{ observation }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {% if lesson.lab.cleanup %}
+          <h3>Afterwards</h3>
+          <ol>
+            {% for command in lesson.lab.cleanup %}
+              <li><code>{{ command }}</code></li>
+            {% endfor %}
+          </ol>
+        {% endif %}
+      </section>
+    {% endif %}
+
+    {% if lesson.quiz %}
+      <section aria-labelledby="quiz-heading">
+        <h2 id="quiz-heading">Check yourself</h2>
+        <form
+          data-quiz-form
+          action="/api/lessons/{{ lesson.slug }}/quiz"
+          method="post"
+        >
+          {% for question in lesson.quiz %}
+            <fieldset data-quiz-question="{{ question.id }}">
+              <legend>{{ question.prompt }}</legend>
+              {% for option in question.options %}
+                <p>
+                  <label>
+                    <input
+                      type="radio"
+                      name="{{ question.id }}"
+                      value="{{ option.id }}"
+                    />
+                    {{ option.text }}
+                  </label>
+                </p>
+              {% endfor %}
+            </fieldset>
+          {% endfor %}
+          <p class="actions">
+            <button type="submit">Submit answers</button>
+            <span class="api-error" data-error role="alert"></span>
+          </p>
+          {# Filled in by the script from the graded response, which is the
+             only place an explanation exists. #}
+          <div data-quiz-results aria-live="polite"></div>
+        </form>
+      </section>
+    {% endif %}
+
+    {% if lesson.mastery_gate %}
+      <section
+        class="card"
+        data-mastery-gate="{{ 'met' if lesson.meets_mastery_gate else 'not-met' }}"
+        aria-labelledby="mastery-heading"
+      >
+        <h2 id="mastery-heading">Mastery</h2>
+        <p>
+          Needs {{ mastery_percent }}% on the quiz and review box
+          {{ lesson.mastery_gate.required_review_level }}.
+        </p>
+        <p>
+          {{ lesson.attempt_count }} attempt(s), best
+          {% if best_percent is not none %}{{ best_percent }}%{% else %}none yet{% endif %}.
+          {{ 'Gate met.' if lesson.meets_mastery_gate else 'Gate not met yet.' }}
+        </p>
+      </section>
+    {% endif %}
+
+    <section
+      class="card"
+      data-review="{{ lesson.review_level if lesson.review_level is not none else 0 }}"
+      aria-labelledby="review-heading"
+    >
+      <h2 id="review-heading">Spaced review</h2>
+      <p data-review-state>
+        Box {{ lesson.review_level if lesson.review_level is not none else 0 }}
+        of {{ review_max_level }}.
+      </p>
+      <p>{{ 'Due now.' if lesson.review_due else 'Not due.' }}</p>
+      <p class="actions">
+        <button
+          type="button"
+          data-review-action="correct"
+          data-review-url="/api/lessons/{{ lesson.slug }}/review"
+        >
+          I remembered this
+        </button>
+        <button
+          type="button"
+          data-review-action="incorrect"
+          data-review-url="/api/lessons/{{ lesson.slug }}/review"
+        >
+          I did not
+        </button>
+      </p>
+    </section>
+
+    {{ ui.note_form(
+        '/api/lessons/' ~ lesson.slug ~ '/note',
+        note_text,
+        'Your note on this lesson',
+    ) }}
+
+    {% if next_lesson %}
+      <nav data-next-lesson aria-label="Next lesson">
+        <h2>Next</h2>
+        <p><a href="{{ next_lesson.url }}">{{ next_lesson.title }}</a></p>
+      </nav>
+    {% endif %}
+  </article>
+{% endblock %}

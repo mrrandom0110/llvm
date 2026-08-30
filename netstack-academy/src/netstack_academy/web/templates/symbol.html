@@ -1,0 +1,126 @@
+{#
+  Where the course stops being prose and starts being the kernel.
+
+  Everything on this page can be wrong in a way that wastes a reader's
+  afternoon, so it is explicit about provenance rather than presenting one
+  confident graph. A `semantic` edge came from clangd and knows where the
+  call happens; a `heuristic` edge came from a regex over the source and may
+  well be a different `static` function of the same name. Each is labelled
+  with what it is and how much to trust it, because "provenance" is jargon
+  and "low confidence" is not.
+
+  The graph is drawn twice on purpose. The visual form is `aria-hidden` and
+  empty until the script fills it, because a picture and a list saying the
+  same thing announce it twice. The list is not a fallback for old browsers:
+  it is how this graph is read by a screen reader, by a keyboard, and by
+  anyone whose window is 400 pixels wide, so the server renders it whether
+  or not any script runs.
+
+  A path is shown only when it is repository-relative. Nothing this program
+  writes produces an index row that escapes the repository, but the index is
+  a file that outlives the process that wrote it, and printing such a path
+  would put somewhere outside the kernel tree on the page whether or not it
+  was a link.
+#}
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+
+{% block title %}{{ symbol.name }} - netstack academy{% endblock %}
+
+{% macro edge_list(edges, empty_message) %}
+  {% if edges %}
+    <ul class="edges">
+      {% for edge in edges %}
+        <li data-provenance="{{ edge.provenance }}" data-confidence="{{ edge.confidence }}">
+          {% if edge.symbol %}
+            <a href="{{ edge.symbol.url }}"><code>{{ edge.name }}</code></a>
+          {% else %}
+            <code>{{ edge.name }}</code>
+            <span class="muted">(not resolved to a definition)</span>
+          {% endif %}
+          <span class="tag">{{ edge.provenance }}</span>
+          <span class="tag">{{ edge.confidence }} confidence</span>
+          {% if edge.site %}
+            <span class="muted">
+              at {{ edge.site.relative_path | repo_path }}:{{ edge.site.line }}
+            </span>
+            {% if edge.site_deep_link %}
+              <a href="{{ edge.site_deep_link }}">open the call site</a>
+            {% endif %}
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>{{ empty_message }}</p>
+  {% endif %}
+{% endmacro %}
+
+{% block main %}
+  {{ ui.breadcrumbs(crumbs) }}
+
+  <article data-symbol-name="{{ symbol.name }}">
+    <h1><code>{{ symbol.name }}</code></h1>
+
+    <section class="card" aria-labelledby="definition-heading">
+      <h2 id="definition-heading">Definition</h2>
+      <dl>
+        <dt>Kind</dt><dd>{{ symbol.kind }}</dd>
+        <dt>File</dt><dd><code>{{ symbol.relative_path | repo_path }}</code></dd>
+        <dt>Line</dt><dd>{{ symbol.line }}</dd>
+        {% if symbol.signature %}
+          <dt>Signature</dt><dd><code>{{ symbol.signature }}</code></dd>
+        {% endif %}
+        {% if symbol.scope %}
+          <dt>Scope</dt><dd><code>{{ symbol.scope }}</code></dd>
+        {% endif %}
+        <dt>Linkage</dt>
+        <dd>{{ 'static to its file' if symbol.is_static else 'external' }}</dd>
+        <dt>Read at commit</dt>
+        <dd>
+          <code>{{ short_commit }}</code>
+          <span class="muted">
+            a line number only means something together with the commit it
+            was read at
+          </span>
+        </dd>
+      </dl>
+      {% if deep_link %}
+        <p><a href="{{ deep_link }}">Open at this line in your editor</a></p>
+      {% else %}
+        <p class="muted">No editor link: {{ deep_link_reason }}</p>
+      {% endif %}
+    </section>
+
+    <section aria-labelledby="graph-heading">
+      <h2 id="graph-heading">Call graph</h2>
+      {#
+        Empty and hidden from assistive technology until the script draws it;
+        the list below is the accessible form and is always present.
+      #}
+      <div
+        class="symbol-graph"
+        data-symbol-graph
+        aria-hidden="true"
+        data-graph-url="{{ graph_url }}"
+      ></div>
+
+      <div data-graph-fallback>
+        <h3>Outgoing calls ({{ outgoing | length }})</h3>
+        {{ edge_list(outgoing, 'Nothing recorded as called from here.') }}
+
+        <h3>Incoming calls ({{ incoming | length }})</h3>
+        {{ edge_list(incoming, 'Nothing recorded as calling this.') }}
+
+        <h3>References ({{ references | length }})</h3>
+        <p class="muted">
+          A reference is a use of the name, not a call and not a second
+          definition.
+        </p>
+        {{ edge_list(references, 'No recorded references.') }}
+      </div>
+    </section>
+
+    {{ ui.note_form(note_url, note_text, 'Your note on this symbol') }}
+  </article>
+{% endblock %}

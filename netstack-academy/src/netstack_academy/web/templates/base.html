@@ -1,0 +1,59 @@
+{#
+  The shell every page owes its reader.
+
+  Four things here are load-bearing rather than decorative. The skip link is
+  the cheapest thing that makes a link-heavy application keyboard-usable. The
+  viewport meta is what lets a lesson be read on a phone at all. Both
+  navigation landmarks are named, because more than one <nav> on a page is
+  indistinguishable to a screen reader otherwise. And the script is deferred
+  and external: nothing on any page is inline, which is what lets the content
+  security policy refuse inline script outright instead of allowing it.
+
+  The search form lives here so search is reachable from every page. Its
+  value is `query_text`, which pages that have no query simply do not define.
+#}
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}netstack academy{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/academy.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <nav aria-label="Site">
+        <a href="/">Dashboard</a>
+        <a href="/search">Search</a>
+      </nav>
+      <form
+        class="search-form"
+        data-search-form
+        role="search"
+        action="/search"
+        method="get"
+      >
+        <label class="visually-hidden" for="site-search">
+          Search lessons and symbols
+        </label>
+        <input
+          id="site-search"
+          type="search"
+          name="q"
+          placeholder="Search lessons and symbols"
+          value="{{ query_text if query_text is defined else '' }}"
+        />
+        <button type="submit">Search</button>
+      </form>
+    </header>
+    {# One live region per page. The script writes a failed request's message
+       here; empty, CSS hides it, so nothing is announced until there is
+       something to announce. #}
+    <p class="api-error" data-error role="alert"></p>
+    <main id="main">
+      {% block main %}{% endblock %}
+    </main>
+    <script src="/static/js/academy.js" defer></script>
+  </body>
+</html>
