@@ -19,6 +19,7 @@ test = [
     "httpx2>=2.0.0",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
+    "pytest-timeout>=2.3.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -28,3 +29,4 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+timeout = 30
