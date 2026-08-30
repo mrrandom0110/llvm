@@ -299,3 +299,166 @@ def test_failed_replace_leaves_previous_index_intact(tmp_path: Path) -> None:
             "tcp_input"
         ]
         assert storage.find_symbols_by_name("tcp_output") == []
+
+
+def _indexed_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    """All columns covered by at least one index (of any kind) on ``table``."""
+    columns: set[str] = set()
+    for index_row in connection.execute(f"PRAGMA index_list('{table}')").fetchall():
+        index_name = index_row[1]
+        for info_row in connection.execute(f"PRAGMA index_info('{index_name}')").fetchall():
+            column_name = info_row[2]
+            if column_name is not None:
+                columns.add(column_name)
+    return columns
+
+
+def test_fresh_schema_indexes_symbol_name_column(tmp_path: Path) -> None:
+    """``find_symbols_by_name``/symbol resolution filters on ``symbols.name``
+    on every call; a fresh database must not force a full table scan for
+    that lookup.
+    """
+    with IndexStorage.open(tmp_path / "index.sqlite3") as storage:
+        indexed_columns = _indexed_columns(storage.connection, "symbols")
+
+    assert "name" in indexed_columns
+
+
+def test_fresh_schema_indexes_edge_source_and_target_columns(tmp_path: Path) -> None:
+    """``outgoing_edges``/``incoming_edges`` filter on
+    ``edges.source_symbol_id``/``edges.target_symbol_id`` respectively; a
+    fresh database must not force a full table scan for either direction.
+    """
+    with IndexStorage.open(tmp_path / "index.sqlite3") as storage:
+        indexed_columns = _indexed_columns(storage.connection, "edges")
+
+    assert "source_symbol_id" in indexed_columns
+    assert "target_symbol_id" in indexed_columns
+
+
+def _symbol_names(storage: IndexStorage, query: str) -> list[str]:
+    return [symbol.name for symbol in storage.search_symbols(query)]
+
+
+def _seed_search_fixture(storage: IndexStorage) -> None:
+    storage.replace_symbols_and_edges(
+        "deadbeef",
+        [
+            _symbol(
+                "tcp_retransmit_skb",
+                "net/ipv4/tcp_output.c",
+                100,
+                signature="(struct sock *sk, struct sk_buff *skb)",
+            ),
+            _symbol("udp_sendmsg", "net/ipv4/udp.c", 200),
+            _symbol("and_then_helper", "net/util.c", 300),
+        ],
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        '"',
+        '"tcp',
+        'tcp"',
+        ";",
+        ";tcp",
+        "tcp;",
+        "*",
+        "AND",
+        "OR",
+        "NOT",
+        "tcp AND",
+        "()",
+        "(tcp",
+        "tcp)",
+        "tcp:input",
+        "-tcp",
+        "^tcp",
+    ],
+)
+def test_search_symbols_never_raises_for_malformed_query_text(
+    tmp_path: Path, query: str
+) -> None:
+    """FTS5 MATCH syntax treats quotes, semicolons, boolean keywords,
+    wildcard/operator characters, and column-filter syntax specially; any
+    of these appearing in ordinary user search text must never surface as
+    an ``sqlite3.OperationalError`` all the way up to the caller. Worst
+    case, the query is treated as literal text that matches nothing.
+    """
+    with IndexStorage.open(tmp_path / "index.sqlite3") as storage:
+        _seed_search_fixture(storage)
+
+        results = storage.search_symbols(query)
+
+    assert isinstance(results, list)
+
+
+def test_search_symbols_returns_empty_list_for_empty_query(tmp_path: Path) -> None:
+    with IndexStorage.open(tmp_path / "index.sqlite3") as storage:
+        _seed_search_fixture(storage)
+
+        results = storage.search_symbols("")
+
+    assert results == []
+
+
+def test_search_symbols_treats_reserved_boolean_keyword_as_literal_text(
+    tmp_path: Path,
+) -> None:
+    """``AND``/``OR``/``NOT`` are FTS5 boolean operators when unquoted, but
+    a symbol search box has no boolean-query syntax exposed to the UI: a
+    reserved keyword typed by a user is just the word they are searching
+    for, and must be matched (or safely fail to match) as literal text.
+    """
+    with IndexStorage.open(tmp_path / "index.sqlite3") as storage:
+        _seed_search_fixture(storage)
+
+        results = _symbol_names(storage, "AND")
+
+    assert results == ["and_then_helper"]
+
+
+def test_search_symbols_treats_trailing_semicolon_as_literal_punctuation(
+    tmp_path: Path,
+) -> None:
+    """A stray trailing semicolon (e.g. pasted from source code) must not
+    turn an otherwise-valid search into an FTS5 syntax error, and must not
+    prevent the intended symbol from being found.
+    """
+    with IndexStorage.open(tmp_path / "index.sqlite3") as storage:
+        _seed_search_fixture(storage)
+
+        results = _symbol_names(storage, "tcp_retransmit_skb;")
+
+    assert results == ["tcp_retransmit_skb"]
+
+
+def test_search_symbols_preserves_prefix_search_with_trailing_wildcard(
+    tmp_path: Path,
+) -> None:
+    """The UI relies on an explicit trailing ``*`` for prefix/autocomplete
+    search (e.g. typing ``retr*`` while a name is still being completed);
+    hardening malformed input must not regress this normal, intentional
+    wildcard usage.
+    """
+    with IndexStorage.open(tmp_path / "index.sqlite3") as storage:
+        _seed_search_fixture(storage)
+
+        results = _symbol_names(storage, "retr*")
+
+    assert results == ["tcp_retransmit_skb"]
+
+
+def test_search_symbols_preserves_exact_name_search(tmp_path: Path) -> None:
+    """Hardening malformed input must not regress the ordinary case: an
+    exact, well-formed symbol name must still be found.
+    """
+    with IndexStorage.open(tmp_path / "index.sqlite3") as storage:
+        _seed_search_fixture(storage)
+
+        results = _symbol_names(storage, "tcp_retransmit_skb")
+
+    assert results == ["tcp_retransmit_skb"]

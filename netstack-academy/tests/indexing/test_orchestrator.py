@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from netstack_academy.indexing.ctags_runner import CtagsRunResult
+from netstack_academy.indexing.ctags_runner import CtagsRunResult, default_index_roots
 from netstack_academy.indexing.fallback_indexer import FallbackIndexResult
 from netstack_academy.indexing.orchestrator import IndexOrchestrator
 from netstack_academy.indexing.semantic.models import ProviderCapabilities
@@ -15,9 +15,11 @@ class _StubCtagsRunner:
     def __init__(self, result: CtagsRunResult) -> None:
         self.result = result
         self.call_count = 0
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def __call__(self, *args: object, **kwargs: object) -> CtagsRunResult:
         self.call_count += 1
+        self.calls.append((args, kwargs))
         return self.result
 
 
@@ -25,9 +27,11 @@ class _StubFallbackIndexer:
     def __init__(self, result: FallbackIndexResult) -> None:
         self.result = result
         self.call_count = 0
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def __call__(self, *args: object, **kwargs: object) -> FallbackIndexResult:
         self.call_count += 1
+        self.calls.append((args, kwargs))
         return self.result
 
 
@@ -234,4 +238,87 @@ def test_ensure_index_reindexes_when_head_changes(
     assert second_result.status == "reindexed"
     assert second_result.head == second_head
     assert storage.current_head() == second_head
+    storage.close()
+
+
+def test_ensure_index_passes_curated_default_roots_to_fallback_indexer(
+    tmp_path: Path, git_repository: Path
+) -> None:
+    """The fallback indexer must never be allowed to fall back to its own
+    whole-repo ``"."`` default: ``IndexOrchestrator`` is the one place that
+    knows the curated, network-focused root list, and it must hand that
+    same list to the fallback indexer explicitly on every reindex.
+    """
+    storage = IndexStorage.open(tmp_path / "index.sqlite3")
+    ctags = _StubCtagsRunner(_empty_ctags_result())
+    fallback = _StubFallbackIndexer(_empty_fallback_result())
+    orchestrator = IndexOrchestrator(
+        git_repository,
+        storage,
+        ctags_runner=ctags,
+        fallback_indexer=fallback,
+        semantic_provider=_StubSemanticProvider(),
+    )
+
+    orchestrator.ensure_index()
+
+    assert fallback.call_count == 1
+    _, fallback_kwargs = fallback.calls[0]
+    assert "roots" in fallback_kwargs
+    assert tuple(fallback_kwargs["roots"]) == default_index_roots()
+    storage.close()
+
+
+def test_ensure_index_passes_curated_default_roots_to_ctags_runner(
+    tmp_path: Path, git_repository: Path
+) -> None:
+    """``ctags_runner`` and ``fallback_indexer`` must be handed the very
+    same curated root list, rather than each independently falling back to
+    its own notion of "everything" -- otherwise the two collectors could
+    silently disagree about what "the index" covers.
+    """
+    storage = IndexStorage.open(tmp_path / "index.sqlite3")
+    ctags = _StubCtagsRunner(_empty_ctags_result())
+    fallback = _StubFallbackIndexer(_empty_fallback_result())
+    orchestrator = IndexOrchestrator(
+        git_repository,
+        storage,
+        ctags_runner=ctags,
+        fallback_indexer=fallback,
+        semantic_provider=_StubSemanticProvider(),
+    )
+
+    orchestrator.ensure_index()
+
+    assert ctags.call_count == 1
+    _, ctags_kwargs = ctags.calls[0]
+    assert "roots" in ctags_kwargs
+    assert tuple(ctags_kwargs["roots"]) == default_index_roots()
+    storage.close()
+
+
+def test_ensure_index_gives_ctags_and_fallback_the_same_roots(
+    tmp_path: Path, git_repository: Path
+) -> None:
+    """Whatever root list the orchestrator computes, both collectors must
+    receive the identical value -- coherence between the two is the whole
+    point of centralizing it in the orchestrator rather than each collector
+    guessing its own default.
+    """
+    storage = IndexStorage.open(tmp_path / "index.sqlite3")
+    ctags = _StubCtagsRunner(_empty_ctags_result())
+    fallback = _StubFallbackIndexer(_empty_fallback_result())
+    orchestrator = IndexOrchestrator(
+        git_repository,
+        storage,
+        ctags_runner=ctags,
+        fallback_indexer=fallback,
+        semantic_provider=_StubSemanticProvider(),
+    )
+
+    orchestrator.ensure_index()
+
+    _, ctags_kwargs = ctags.calls[0]
+    _, fallback_kwargs = fallback.calls[0]
+    assert tuple(ctags_kwargs["roots"]) == tuple(fallback_kwargs["roots"])
     storage.close()

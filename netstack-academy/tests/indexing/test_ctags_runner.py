@@ -266,3 +266,80 @@ def test_run_ctags_invokes_indexing_subprocess_with_repo_as_cwd(
     run_ctags(git_repository)
 
     assert captured_kwargs.get("cwd") == git_repository
+
+
+def test_run_ctags_skips_indexing_subprocess_when_no_configured_roots_exist(
+    monkeypatch: pytest.MonkeyPatch, git_repository: Path
+) -> None:
+    """When none of the caller-supplied ``roots`` exist on disk, there are
+    no path operands to give ctags. Invoking ``ctags -R`` with no path
+    operands still recursively scans ``cwd``, defeating the whole purpose
+    of a curated root list, so the indexing subprocess must never be
+    launched at all in this case -- only the ``--version`` probe runs, and
+    the result degrades to a benign, empty outcome instead of an error.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if "--version" in args:
+            return _fake_completed("Universal Ctags 6.1.0\n")
+        return _fake_completed("")
+
+    monkeypatch.setattr(ctags_runner.subprocess, "run", fake_run)
+
+    result = run_ctags(git_repository, roots=["does/not/exist"])
+
+    assert len(calls) == 1  # only the --version probe; no recursive fallback scan
+    assert result.status not in {"error", "timeout"}
+    assert result.definitions == []
+
+
+def test_run_ctags_requests_signature_field(
+    monkeypatch: pytest.MonkeyPatch, git_repository: Path
+) -> None:
+    """Ctags definitions are meant to carry a ``signature`` (see
+    ``CtagsDefinition.signature`` / ``ctags_parser``), which Universal
+    Ctags only emits when the ``S`` fields flag is requested. Without it,
+    every parsed definition's ``signature`` is silently ``None``.
+    """
+    captured_args: list[str] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "--version" in args:
+            return _fake_completed("Universal Ctags 6.1.0\n")
+        captured_args.extend(args)
+        return _fake_completed("")
+
+    monkeypatch.setattr(ctags_runner.subprocess, "run", fake_run)
+
+    run_ctags(git_repository)
+
+    fields_args = [arg for arg in captured_args if arg.startswith("--fields=")]
+    assert fields_args, "expected a --fields= argument in the ctags invocation"
+    assert any("S" in arg for arg in fields_args)
+
+
+def test_run_ctags_uses_the_same_caller_supplied_timeout_for_probe_and_index(
+    monkeypatch: pytest.MonkeyPatch, git_repository: Path
+) -> None:
+    """``run_ctags(..., timeout=...)`` bounds the indexing subprocess, but
+    the ``--version`` probe it runs first (via ``check_ctags_binary``) is
+    hard-coded to ``CTAGS_VERSION_TIMEOUT_SECONDS`` regardless of what the
+    caller asked for. A caller with a tight overall budget must have that
+    budget honored coherently by *both* subprocess invocations, not just
+    the second one.
+    """
+    captured_timeouts: list[object] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured_timeouts.append(kwargs.get("timeout"))
+        if "--version" in args:
+            return _fake_completed("Universal Ctags 6.1.0\n")
+        return _fake_completed("")
+
+    monkeypatch.setattr(ctags_runner.subprocess, "run", fake_run)
+
+    run_ctags(git_repository, timeout=1.0)
+
+    assert captured_timeouts == [1.0, 1.0]

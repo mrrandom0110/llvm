@@ -113,3 +113,86 @@ def test_fallback_returns_empty_result_for_directory_without_c_files(
 
     assert result.symbols == []
     assert result.edges == []
+
+
+def test_fallback_scans_header_files_for_definitions_under_configured_roots(
+    tmp_path: Path,
+) -> None:
+    """Network headers commonly define ``static inline`` helpers directly
+    in the ``.h`` file; the fallback scanner must not restrict itself to
+    ``.c`` sources, or every such definition is silently invisible.
+    """
+    repo = tmp_path / "kernel"
+    net_dir = repo / "net"
+    net_dir.mkdir(parents=True)
+    (net_dir / "proto.h").write_text(
+        "static inline int helper_inline(int x)\n"
+        "{\n"
+        "    return x + 1;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = index_fallback(repo, roots=["net"])
+
+    names = {symbol.name for symbol in result.symbols}
+    assert "helper_inline" in names
+
+    helper = next(s for s in result.symbols if s.name == "helper_inline")
+    assert helper.relative_path == "net/proto.h"
+    assert helper.is_static is True
+
+
+def test_fallback_default_roots_exclude_unrelated_directories(
+    tmp_path: Path,
+) -> None:
+    """With no ``roots`` argument, the fallback scanner must use the same
+    curated, bounded root list as the rest of the pipeline -- never a
+    whole-repo ``"."`` scan -- so an unrelated tree such as ``fs/`` is
+    never touched even when it contains C sources.
+    """
+    repo = tmp_path / "kernel"
+    net_dir = repo / "net"
+    net_dir.mkdir(parents=True)
+    (net_dir / "a.c").write_text(
+        "int helper(int x)\n{\n    return x;\n}\n",
+        encoding="utf-8",
+    )
+
+    fs_dir = repo / "fs"
+    fs_dir.mkdir(parents=True)
+    (fs_dir / "unrelated.c").write_text(
+        "int fs_helper(int x)\n{\n    return x;\n}\n",
+        encoding="utf-8",
+    )
+
+    result = index_fallback(repo)
+
+    paths = {symbol.relative_path for symbol in result.symbols}
+    assert not any(path.startswith("fs/") for path in paths)
+    assert any(path.startswith("net/") for path in paths)
+
+
+def test_fallback_default_roots_include_curated_single_file_header_definitions(
+    tmp_path: Path,
+) -> None:
+    """The curated default root list names specific header *files* (e.g.
+    ``include/linux/skbuff.h``), not just directories. With no ``roots``
+    argument, the fallback scanner must still resolve those file roots and
+    extract their ``.h`` definitions.
+    """
+    repo = tmp_path / "kernel"
+    header_dir = repo / "include" / "linux"
+    header_dir.mkdir(parents=True)
+    (header_dir / "skbuff.h").write_text(
+        "static inline int skb_helper(int x)\n"
+        "{\n"
+        "    return x + 1;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = index_fallback(repo)
+
+    names = {symbol.name for symbol in result.symbols}
+    assert "skb_helper" in names
