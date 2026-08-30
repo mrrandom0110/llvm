@@ -25,6 +25,15 @@ Three habits keep the surface small:
 - **Nothing here executes anything.** Lessons *display* kernel lab
   commands; a course full of shell is content, not a command to run.
 
+Two more rules govern the learning endpoints specifically. Grading is
+server-side against the loaded lesson, so a submission contributes which
+option was chosen and nothing else, and the answer key and its explanations
+appear only in the response to an attempt that has already been recorded --
+there is no code path that produces them for a learner who has not answered.
+And search degrades rather than fails: when the symbol index cannot be
+built, the lesson half of a result still answers, with a reason attached,
+because an unbuilt index is not a reason to break the working half.
+
 Every handler is ``async`` even though the work inside is synchronous. That
 is deliberate: a ``def`` handler is run in a threadpool, which would mean two
 requests touching the one SQLite connection from two threads at once. Serving
@@ -56,6 +65,10 @@ from netstack_academy.indexing.paths import is_safe_relative_path
 from netstack_academy.learning.quiz import (
     UnknownQuizOptionError,
     UnknownQuizQuestionError,
+    grade_quiz,
+)
+from netstack_academy.learning.services import (
+    DEFAULT_SEARCH_LIMIT as _LEARNING_DEFAULT_SEARCH_LIMIT,
 )
 from netstack_academy.learning.store import (
     InvalidStatusTransitionError,
@@ -74,7 +87,11 @@ from .payloads import (
     edge_payload,
     index_run_response,
     index_status_payload,
+    note_payload,
     progress_payload,
+    quiz_attempt_payload,
+    review_card_payload,
+    search_payload,
     symbol_payload,
 )
 
@@ -89,8 +106,11 @@ DEFAULT_PORT = 8765
 #: symbol table.
 MAX_SEARCH_LIMIT = 100
 
-#: What a caller gets when it does not say.
-DEFAULT_SEARCH_LIMIT = 20
+#: What a search returns when the caller does not say how many results it
+#: wants. Taken from the learning layer rather than declared again here, so
+#: the two halves of a combined search cannot drift into different defaults,
+#: and re-exported because it is part of this module's HTTP contract.
+DEFAULT_SEARCH_LIMIT = _LEARNING_DEFAULT_SEARCH_LIMIT
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 TEMPLATE_ROOT = PACKAGE_ROOT / "templates"
@@ -173,12 +193,28 @@ class QuizSubmission(BaseModel):
     """Which option was chosen for each question, and nothing else.
 
     No score, no answer: grading happens server-side against the loaded
-    lesson, so nothing in this payload can influence its own result.
+    lesson, so nothing in this payload can influence its own result. A body
+    that carries a ``score`` is refused by ``extra="forbid"`` rather than
+    quietly ignored -- a client that thinks it grades its own quizzes should
+    hear about it.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     responses: dict[str, str]
+
+
+class ReviewRequest(BaseModel):
+    """The outcome of one spaced-review answer.
+
+    A single boolean is the whole input: the next level and the next due
+    date follow from it and the clock, with no difficulty estimate and no
+    randomness, which is what makes "what is due today" have one answer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    correct: bool
 
 
 def create_web_app(context: AcademyContext) -> FastAPI:
@@ -371,7 +407,15 @@ def create_web_app(context: AcademyContext) -> FastAPI:
         if not submitted.body.strip():
             raise errors.invalid_note_body()
         note = context.store.upsert_lesson_note(lesson.id, submitted.body)
-        return {"lesson_id": lesson.id, "body": note.body}
+        return {"lesson_id": lesson.id, **note_payload(note.body)}
+
+    @app.delete("/api/lessons/{key}/note")
+    async def delete_lesson_note(key: str) -> dict[str, Any]:
+        lesson = _require_lesson(key)
+        return {
+            "lesson_id": lesson.id,
+            "deleted": context.store.delete_lesson_note(lesson.id),
+        }
 
     @app.put("/api/symbols/{name}/note")
     async def put_symbol_note(
@@ -382,8 +426,7 @@ def create_web_app(context: AcademyContext) -> FastAPI:
         # The path is checked before the body: an unsafe path is refused
         # whether or not the note itself would have been acceptable, and the
         # store must never be asked to write one.
-        if path is not None and not is_safe_relative_path(path):
-            raise errors.unsafe_path()
+        _require_safe_note_path(path)
         if not submitted.body.strip():
             raise errors.invalid_note_body()
         try:
@@ -392,13 +435,36 @@ def create_web_app(context: AcademyContext) -> FastAPI:
             )
         except UnsafeNotePathError as exc:
             raise errors.unsafe_path() from exc
-        return {"symbol": name, "relative_path": path, "body": note.body}
+        return {
+            "symbol": name,
+            "relative_path": path,
+            **note_payload(note.body),
+        }
+
+    @app.delete("/api/symbols/{name}/note")
+    async def delete_symbol_note(
+        name: str, path: str | None = Query(default=None)
+    ) -> dict[str, Any]:
+        _require_safe_note_path(path)
+        return {
+            "symbol": name,
+            "relative_path": path,
+            "deleted": context.store.delete_symbol_note(name, relative_path=path),
+        }
 
     @app.post("/api/lessons/{key}/quiz")
     async def submit_quiz(key: str, submitted: QuizSubmission) -> dict[str, Any]:
         lesson = _require_lesson(key)
+
+        # Graded twice, deliberately. This call validates the submission and
+        # produces the per-question results the response needs; the store
+        # grades again inside ``record_quiz_attempt`` because the score it
+        # persists must come from the answer key it read, not from a number
+        # this handler passed in. Doing it in this order also means a
+        # divergent submission is refused before the store is touched at
+        # all, so a rejected attempt leaves no row behind.
         try:
-            attempt = context.store.record_quiz_attempt(lesson, submitted.responses)
+            grade = grade_quiz(lesson, submitted.responses)
         except (UnknownQuizQuestionError, UnknownQuizOptionError) as exc:
             # The submission and the content have diverged -- a stale page, a
             # renamed question, or tampering. Scoring it as merely "wrong"
@@ -409,22 +475,65 @@ def create_web_app(context: AcademyContext) -> FastAPI:
                 "lesson and submit again."
             ) from exc
 
-        return {
-            "lesson_id": attempt.lesson_id,
-            "score": attempt.score,
-            "correct_count": attempt.correct_count,
-            "question_count": attempt.question_count,
-        }
+        attempt = context.store.record_quiz_attempt(lesson, submitted.responses)
+        return quiz_attempt_payload(
+            attempt, grade.results, context.learning.lesson_view(lesson.id)
+        )
+
+    @app.post("/api/lessons/{key}/review")
+    async def record_review(key: str, submitted: ReviewRequest) -> dict[str, Any]:
+        lesson = _require_lesson(key)
+        card = context.store.record_review(lesson.id, correct=submitted.correct)
+        return review_card_payload(card)
+
+    # ------------------------------------------------------------------
+    # Portable state
+    # ------------------------------------------------------------------
+
+    @app.get("/api/state/export")
+    async def export_state() -> dict[str, Any]:
+        # Returned as the store produced it, with no envelope: this document
+        # is the input to /api/state/import, and a wrapper would mean the two
+        # endpoints no longer round-trip through each other.
+        return context.store.export_state()
 
     @app.post("/api/state/import")
     async def import_state(
         document: Annotated[dict[str, Any], Body()],
     ) -> dict[str, Any]:
+        # A restore, not a merge, and validated in full before the first
+        # write -- so a problem in the last record cannot leave the earlier
+        # ones applied. The store owns both properties; this is the
+        # translation of its refusal into a status code.
+        #
+        # The store's reason travels in ``details.reason`` while the
+        # top-level message stays fixed, which is what makes it safe to
+        # forward: those messages name the record and field that failed --
+        # in a document of hundreds of records, the difference between a
+        # fixable error and an unactionable one -- and what they quote is
+        # the caller's own document, not anything from this machine.
         try:
             context.store.import_state(document)
         except (StateImportError, UnsafeNotePathError) as exc:
             raise errors.invalid_state_document(str(exc)) from exc
         return {"imported": True}
+
+    # ------------------------------------------------------------------
+    # Combined search
+    # ------------------------------------------------------------------
+
+    @app.get("/api/search")
+    async def search(
+        q: str = Query(default=""),
+        limit: Annotated[int, Query(ge=1, le=MAX_SEARCH_LIMIT)] = DEFAULT_SEARCH_LIMIT,
+    ) -> dict[str, Any]:
+        # The service composes both halves, so a blank query returns early
+        # and never reaches the symbol index -- searching for nothing is not
+        # a reason to spend minutes indexing a kernel tree.
+        results = context.learning.search(q, limit=limit)
+        return search_payload(
+            results, symbols_unavailable_reason=_symbols_unavailable_reason()
+        )
 
     # ------------------------------------------------------------------
     # Shared resolution helpers
@@ -454,6 +563,28 @@ def create_web_app(context: AcademyContext) -> FastAPI:
             raise errors.symbol_not_found(name) from exc
         except InvalidRepositoryPathError as exc:
             raise errors.unsafe_path() from exc
+
+    def _require_safe_note_path(path: str | None) -> None:
+        """Refuse a note path that is not repository-relative.
+
+        The store checks this too, and its check is the real guarantee. This
+        one exists so the refusal becomes a typed 400 whose message does not
+        quote the path back, and so the store is never asked to write one.
+        """
+        if path is not None and not is_safe_relative_path(path):
+            raise errors.unsafe_path()
+
+    def _symbols_unavailable_reason() -> str | None:
+        """Why the symbol half of a search may be short, or ``None``.
+
+        Only a *failed* run is worth reporting. An index that is merely
+        empty or one commit behind still answers, and calling that
+        unavailable would put a warning on a working search.
+        """
+        last_result = context.index.last_result
+        if last_result is None or last_result.status != "failed":
+            return None
+        return last_result.reason or "The symbol index could not be built."
 
     def _symbol_or_none(symbol_id: int | None) -> SymbolView | None:
         """An edge endpoint, when the index can still name it.

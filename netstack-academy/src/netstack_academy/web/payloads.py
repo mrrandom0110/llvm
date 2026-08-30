@@ -22,15 +22,24 @@ anything outside the kernel repository, and the refusal is reported as
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlencode
 
 from netstack_academy.indexing.orchestrator import IndexRunResult, ProviderDiagnostic
 from netstack_academy.indexing.service import EdgeView, SymbolView
-from netstack_academy.learning.services import DashboardView, LessonSummary, ModuleView
-from netstack_academy.learning.store import LessonProgress
+from netstack_academy.learning.quiz import QuestionResult
+from netstack_academy.learning.review import MAX_LEITNER_LEVEL
+from netstack_academy.learning.services import (
+    DashboardView,
+    LessonHit,
+    LessonSummary,
+    LessonView,
+    ModuleView,
+    SearchResults,
+)
+from netstack_academy.learning.store import LessonProgress, QuizAttempt, ReviewCard
 from netstack_academy.repo_inspector import RepositoryState
 from netstack_academy.settings import Settings
 
@@ -47,6 +56,11 @@ CONFIDENCE_BY_PROVENANCE: Mapping[str, str] = {
 #: Used when a future provenance reaches here without a mapping above --
 #: better to under-claim than to present a guess as a fact.
 DEFAULT_CONFIDENCE = "low"
+
+
+def lesson_url(slug: str) -> str:
+    """The page for one lesson. Slugs are the URL identity, not ids."""
+    return f"/lessons/{quote(slug, safe='')}"
 
 
 def symbol_url(name: str, relative_path: str | None = None) -> str:
@@ -223,7 +237,7 @@ def lesson_summary_payload(summary: LessonSummary) -> dict[str, Any]:
         "completed_at": _moment(summary.completed_at),
         "is_unlocked": summary.is_unlocked,
         "review_due": summary.review_due,
-        "url": f"/lessons/{quote(summary.slug, safe='')}",
+        "url": lesson_url(summary.slug),
     }
 
 
@@ -257,4 +271,117 @@ def dashboard_payload(dashboard: DashboardView) -> dict[str, Any]:
             else None
         ),
         "modules": [module_payload(module) for module in dashboard.modules],
+    }
+
+
+def note_payload(body: str) -> dict[str, Any]:
+    """A saved note, verbatim.
+
+    The learner's own text goes back exactly as it was written. Escaping
+    belongs to the template at render time, not to storage or transport: a
+    note that arrives HTML-escaped can never be edited without accumulating
+    entities, and one that arrives pre-rendered cannot be escaped correctly
+    by whatever displays it next.
+    """
+    return {"body": body}
+
+
+def review_card_payload(card: ReviewCard) -> dict[str, Any]:
+    """Where a card sits on the ladder and when it comes back.
+
+    ``max_level`` travels with it because "level 3" means nothing without
+    the height of the ladder, and the client should not hard-code it.
+    """
+    return {
+        "lesson_id": card.lesson_id,
+        "level": card.level,
+        "max_level": MAX_LEITNER_LEVEL,
+        "next_due": _moment(card.next_due),
+        "last_reviewed_at": _moment(card.last_reviewed_at),
+    }
+
+
+def quiz_result_payload(result: QuestionResult) -> dict[str, Any]:
+    """One graded question, *after* an attempt was recorded.
+
+    This is the only shape in the API that carries ``correct_option_id`` and
+    ``explanation``. It is built from a grade, which only exists once a
+    submission has been made, so there is no code path that produces it for
+    a learner who has not answered yet -- that is what
+    :func:`~netstack_academy.curriculum.models.public_quiz` is for.
+    """
+    return {
+        "question_id": result.question_id,
+        "response": result.response,
+        "correct": result.correct,
+        "correct_option_id": result.correct_option_id,
+        "explanation": result.explanation,
+    }
+
+
+def quiz_attempt_payload(
+    attempt: QuizAttempt,
+    results: Sequence[QuestionResult],
+    lesson: LessonView,
+) -> dict[str, Any]:
+    """The graded submission.
+
+    ``score`` is read back from the recorded attempt rather than from the
+    grade the handler computed, so the number returned to the learner is
+    provably the number that was persisted. ``lesson`` supplies the
+    across-attempts figures -- best score, attempt count, and whether the
+    mastery gate is now met -- so this endpoint and the lesson page cannot
+    disagree about a gate.
+    """
+    return {
+        "lesson_id": attempt.lesson_id,
+        "score": attempt.score,
+        "correct_count": attempt.correct_count,
+        "question_count": attempt.question_count,
+        "submitted_at": _moment(attempt.created_at),
+        "results": [quiz_result_payload(result) for result in results],
+        "attempt_count": lesson.attempt_count,
+        "best_score": lesson.best_score,
+        "meets_mastery_gate": lesson.meets_mastery_gate,
+    }
+
+
+def lesson_hit_payload(hit: LessonHit) -> dict[str, Any]:
+    """One curriculum search hit.
+
+    ``matched_fields`` is the part worth keeping: "why is this result here"
+    is otherwise unanswerable from a title, and a reader who searched for a
+    function name wants to know it was the body that matched.
+    """
+    return {
+        "lesson_id": hit.lesson_id,
+        "slug": hit.slug,
+        "title": hit.title,
+        "module_slug": hit.module_slug,
+        "module_title": hit.module_title,
+        "summary": hit.summary,
+        "status": hit.status,
+        "matched_fields": list(hit.matched_fields),
+        "url": lesson_url(hit.slug),
+    }
+
+
+def search_payload(
+    results: SearchResults, *, symbols_unavailable_reason: str | None = None
+) -> dict[str, Any]:
+    """Both halves of one search, and the reason one of them may be short.
+
+    The symbol half degrades rather than failing: a reader whose index has
+    not been built yet still gets every lesson hit, an empty ``symbols``
+    list, and ``symbols_unavailable_reason`` explaining what to fix. An
+    error here would take the working half down with the broken one.
+    """
+    lessons = [lesson_hit_payload(hit) for hit in results.lessons]
+    symbols = [symbol_payload(symbol) for symbol in results.symbols]
+    return {
+        "query": results.query,
+        "lessons": lessons,
+        "symbols": symbols,
+        "counts": {"lessons": len(lessons), "symbols": len(symbols)},
+        "symbols_unavailable_reason": symbols_unavailable_reason,
     }
